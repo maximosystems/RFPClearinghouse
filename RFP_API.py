@@ -125,7 +125,7 @@ class RFPDataIngestion:
         """
         logging.info("Bypassing OpenGov Public APIs...")
         
-        florida_portals = ["orlando", "manateecounty", "citruscountyfl"] 
+        florida_portals = ["orlando", "citrusfl"] 
         
         headers = {
             "accept": "*/*",
