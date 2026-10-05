@@ -123,4 +123,128 @@ class RFPDataIngestion:
                 "quickSearchQuery": None,
                 "limit": 100,
                 "page": 1,
-                "sortField": "proposalDeadline
+                "sortField": "proposalDeadline",
+                "sortDirection": "DESC"
+            }
+            try:
+                response = requests.post(url, headers=headers, json=payload)
+                response.raise_for_status()
+                data = response.json()
+                
+                projects = data.get('data', []) if isinstance(data, dict) else data
+                
+                for item in projects:
+                    self.rfp_master_list.append({
+                        "source": f"OpenGov-{portal}",
+                        "title": item.get('title', item.get('name', 'Unknown Title')),
+                        "agency": portal,
+                        "published_date": item.get('publishedAt', item.get('releaseDate', '')),
+                        "raw_metadata": item,
+                        "url": f"https://procurement.opengov.com/portal/{portal}/projects/{item.get('id')}" if item.get('id') else f"https://procurement.opengov.com/portal/{portal}"
+                    })
+                logging.info(f"OpenGov extraction successful for {portal}. Found {len(projects)} bids.")
+            except Exception as e:
+                logging.error(f"Failed to fetch OpenGov portal {portal}: {e}")
+
+    def execute_pipeline(self):
+        self.scrape_florida_clearinghouse()
+        self.intercept_demandstar_xhr()
+        self.bypass_opengov_api()
+        logging.info(f"Pipeline complete. Ingested {len(self.rfp_master_list)} total RFPs.")
+        return json.dumps(self.rfp_master_list, indent=4)
+
+
+class DurmotIntelligence:
+    def __init__(self, db_url):
+        self.db_url = db_url
+        
+        # Piggyback / Cooperative Purchasing Keywords
+        self.piggyback_keywords = [
+            r"\bpiggyback\b", r"\bcooperative purchasing\b", r"\bomnia\b", 
+            r"\bsourcewell\b", r"\bnaspo\b", r"\bstate term contract\b", r"\bgsa\b"
+        ]
+        
+        # Wired Bid / Restrictive Language Heuristics
+        self.wired_heuristics = {
+            r"\bsole source\b": 40,
+            r"\bproprietary\b": 30,
+            r"\bbrand name only\b": 35,
+            r"\bincumbent\b": 20,
+            r"\bmandatory pre-bid\b": 25,
+            r"\bno substitutions\b": 30
+        }
+
+    def score_and_flag(self, rfp):
+        search_text = f"{rfp['title']} {rfp['agency']} {json.dumps(rfp['raw_metadata'])}".lower()
+        
+        is_piggyback = any(re.search(kw, search_text) for kw in self.piggyback_keywords)
+        
+        wired_score = 0
+        wired_flags = []
+        
+        for pattern, points in self.wired_heuristics.items():
+            if re.search(pattern, search_text):
+                wired_score += points
+                wired_flags.append(pattern.replace(r"\b", "").strip().title())
+                
+        wired_score = min(wired_score, 100)
+        
+        rfp['is_piggyback'] = is_piggyback
+        rfp['wired_score'] = wired_score
+        rfp['wired_flags'] = wired_flags
+        return rfp
+
+    def insert_to_postgres(self, rfp_list):
+        logging.info("Connecting to PostgreSQL to insert intelligence data...")
+        try:
+            conn = psycopg2.connect(self.db_url)
+            cursor = conn.cursor()
+            
+            inserted_count = 0
+            for raw_rfp in rfp_list:
+                rfp = self.score_and_flag(raw_rfp)
+                
+                insert_query = """
+                    INSERT INTO durmot_rfp_intelligence 
+                    (source, agency, title, published_date, url, is_piggyback, wired_score, wired_flags, raw_metadata)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (url) DO NOTHING;
+                """
+                
+                pub_date = rfp['published_date'] if rfp['published_date'] else None
+                
+                cursor.execute(insert_query, (
+                    rfp['source'],
+                    rfp['agency'],
+                    rfp['title'],
+                    pub_date,
+                    rfp['url'],
+                    rfp['is_piggyback'],
+                    rfp['wired_score'],
+                    rfp['wired_flags'],
+                    Json(rfp['raw_metadata'])
+                ))
+                
+                if cursor.rowcount > 0:
+                    inserted_count += 1
+                    
+            conn.commit()
+            cursor.close()
+            conn.close()
+            logging.info(f"Database insertion complete. Added {inserted_count} new RFPs.")
+            
+        except Exception as e:
+            logging.error(f"PostgreSQL Insertion Failed: {e}")
+
+
+if __name__ == "__main__":
+    # 1. Run the existing ingestion pipeline
+    pipeline = RFPDataIngestion()
+    rfp_json_string = pipeline.execute_pipeline()
+    master_rfp_list = json.loads(rfp_json_string)
+    
+    # 2. Run the intelligence and database insertion layer
+    DATABASE_URL = os.environ.get("DATABASE_URL", "postgresql://user:password@localhost:5432/durmot")
+    
+    intelligence_engine = DurmotIntelligence(DATABASE_URL)
+    intelligence_engine.insert_to_postgres(master_rfp_list)
