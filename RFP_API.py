@@ -1,5 +1,6 @@
 import os
 import re
+import io
 import json
 import logging
 import requests
@@ -9,6 +10,7 @@ from psycopg2.extras import Json
 from datetime import datetime
 from dateutil import parser
 from bs4 import BeautifulSoup
+from pypdf import PdfReader
 from flask import Flask, render_template_string
 
 # Configure logging for Railway/Durmot monitoring
@@ -59,13 +61,22 @@ class RFPDataIngestion:
                         notices = nested_lists[0]
 
             for item in notices:
+                # Extract the hidden keys discovered in the JSON payload
+                agency = item.get('city', item.get('paper', 'Florida Public Notice'))
+                title = item.get('notice', 'Unknown Title')
+                notice_date = item.get('date', '')
+                
+                # Prioritize the direct PDF link if it exists
+                pdf_link = item.get('_links', {}).get('media', {}).get('href', '')
+                final_url = pdf_link if pdf_link else f"https://floridapublicnotices.com/notice/{item.get('id', '')}"
+                
                 self.rfp_master_list.append({
                     "source": "FloridaPublicNotices",
-                    "title": item.get('title', item.get('notice_title', 'Unknown Title')),
-                    "agency": item.get('county', 'Unknown County'),
-                    "published_date": item.get('date', item.get('publish_date', '')),
+                    "title": title,
+                    "agency": agency,
+                    "published_date": notice_date,
                     "raw_metadata": item,
-                    "url": f"https://floridapublicnotices.com/notice/{item.get('id', '')}" if item.get('id') else ''
+                    "url": final_url
                 })
             logging.info(f"Florida Clearinghouse extraction successful. Found {len(notices)} notices.")
         except Exception as e:
@@ -183,13 +194,27 @@ class DurmotIntelligence:
         ]
 
     def scrape_deep_text(self, url):
+        """Fetches HTML or PDF from the bid URL and strips it to plain text for deep scanning."""
         if not url: return ""
         try:
             headers = {'User-Agent': 'Mozilla/5.0'}
-            res = requests.get(url, headers=headers, timeout=5)
+            # Set a 10-second timeout to allow for PDF downloads
+            res = requests.get(url, headers=headers, timeout=10)
             if res.status_code == 200:
-                soup = BeautifulSoup(res.text, 'html.parser')
-                return soup.get_text(separator=' ', strip=True).lower()
+                # If the URL is a PDF or the server returns a PDF content type, read it with pypdf
+                if url.lower().endswith('.pdf') or 'application/pdf' in res.headers.get('Content-Type', '').lower():
+                    reader = PdfReader(io.BytesIO(res.content))
+                    text = ""
+                    # Read up to the first 15 pages to catch tech specs without hanging the server
+                    for page in reader.pages[:15]:
+                        extracted = page.extract_text()
+                        if extracted:
+                            text += extracted + " "
+                    return text.lower()
+                else:
+                    # Otherwise, fall back to standard HTML parsing
+                    soup = BeautifulSoup(res.text, 'html.parser')
+                    return soup.get_text(separator=' ', strip=True).lower()
         except Exception:
             pass
         return ""
@@ -248,7 +273,7 @@ class DurmotIntelligence:
         return rfp
 
     def insert_to_postgres(self, rfp_list):
-        logging.info("Connecting to PostgreSQL to insert intelligence data. This may take longer due to deep page scraping...")
+        logging.info("Connecting to PostgreSQL to insert intelligence data. This may take longer due to deep page and PDF scraping...")
         try:
             conn = psycopg2.connect(self.db_url)
             cursor = conn.cursor()
