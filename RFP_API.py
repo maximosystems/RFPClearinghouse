@@ -21,7 +21,7 @@ class RFPDataIngestion:
         """
         logging.info("Starting Florida Clearinghouse Scrape...")
         
-        # NOTE: Update this URL with the exact AJAX endpoint from your browser's network tab
+        # NOTE: Update this URL with the exact AJAX endpoint from your browser's network tab once extracted
         url = "https://floridapublicnotices.com/api/search" 
         
         payload = {
@@ -47,30 +47,50 @@ class RFPDataIngestion:
         except Exception as e:
             logging.error(f"Failed to scrape Florida Clearinghouse: {e}")
 
-    def intercept_demandstar_xhr(self, state="FL"):
+    def intercept_demandstar_xhr(self):
         """
         Target: DemandStar Backend Search API
-        Bypasses the UI by hitting the unauthenticated JSON endpoint feeding their frontend.
+        Uses authenticated JWT token to bypass the UI and pull live external/active bids.
         """
         logging.info("Intercepting DemandStar XHR Feed...")
         
-        # NOTE: Right-click the DemandStar search XHR request in dev tools and paste the URL here
-        url = f"https://network.demandstar.com/api/bids/search?state={state}&status=active"
+        url = "https://api.demandstar.com/contents/content/v1/bids/search"
+        
+        headers = {
+            "accept": "application/json",
+            "content-type": "application/json",
+            "cookie": "_gcl_au=1.1.1200877539.1791220009; _gid=GA1.2.1930483286.1791220009; amp_53320e=x2XnAzd9U-xg3vBfOidt-w...1k46gggi8.1k46ggi7q.0.0.0; amp_53320e_demandstar.com=x2XnAzd9U-xg3vBfOidt-w...1k46gggi8.1k46ggi9g.0.0.0; _ga=GA1.2.30132793.1791220009; DemandStarToken=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1cyI6IjE5NDk3NTMiLCJtaSI6IjIzNzc4MDIiLCJwbWlkIjoiMCIsImZuIjoiTWF4IiwibG4iOiJDYXN0YW5lZGEiLCJtcyI6IkFDIiwibXQiOiJTUyIsIm1ncnRkIjoiVHJ1ZSIsImxrZCI6IkZhbHNlIiwibG0iOiIwIiwidW4iOiJNYXhDYXN0YW5lZGFJSUlAZ21haWwuY29tIiwidXQiOiJEUyIsImVtbCI6Im1heGNhc3RhbmVkYWlpaUBnbWFpbC5jb20iLCJwcm1zIjoiIDIsIDMsIDE0LCAxNSIsIm1sIjoiMiw0IiwibWMiOiJUcnVlIiwiZm1pIjoiMCIsImxsIjoiMTEvOC8yMDI0IDQ6NDg6MzkgUE0iLCJtY2QiOiIyLzYvMjAxOSA0OjUzOjAwIFBNIiwiYWNkIjoiMTAvNS8yMDI2IDU6MTI6MTAgUE0iLCJkbiI6IiIsInB0IjoiQUciLCJ0bSI6ImxpZ2h0X0RTIiwiaWF0IjoiMTc5MTIyMDMzMCIsIm1ibCI6IkZhbHNlIiwianRpIjoiN2EyNWNiZTEtMDg2Yi00MmE1LThmNGItODIxN2IyY2MyYjI1IiwibmJmIjoxNzkxMjIwMzMwLCJleHAiOjE3OTEzMDY3MzAsImlzcyI6IkRlbWFuZHN0YXIgQ29ycG9yYXRpb24ifQ.pO8a3RkafaN4nlYH5S-JsT3Zfm3ql3rwVFnC_kStRfk; MEMBERID=2377802; __cf_bm=kqKHYt34heN1e6tNQu7jxUeZTIk_uWZLNWlY4ZXthwc-1791221976.0147386-1.0.1.1-Gt7Xn4lBJvVwksIoiVRWtgDYKU_eUGwINlQJZMD783Kpb_dLGMuQIVo6JGX5HSIOpx0y0MdQqGoUG_2aLvUANLRky2nLXEA49i4zPmHzqLh6hrDvAPPBHFLLlp.b6TdA; _ga_QLPM2XWL45=GS2.1.s1791220009$o1$g1$t1791222383$j57$l0$h0; _gat_UA-177609458-1=1",
+            "origin": "https://www.demandstar.com",
+            "referer": "https://www.demandstar.com/",
+            "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36"
+        }
+        
+        payload = {
+            "showBids": "externalBids",
+            "bidStatus": "AC",
+            "includeExternalBids": "true",
+            "sortBy": "broadCastDate",
+            "sortOrder": "DESC",
+            "commodityExists": True
+        }
         
         try:
-            response = requests.get(url, headers=self.headers)
+            response = requests.post(url, headers=headers, json=payload)
             response.raise_for_status()
             data = response.json()
             
-            for item in data.get('bids', []):
+            bids = data.get('data', []) if isinstance(data, dict) else data
+            
+            for item in bids:
                 self.rfp_master_list.append({
                     "source": "DemandStar",
                     "title": item.get('bidName', 'Unknown Title'),
                     "agency": item.get('agencyName', 'Unknown Agency'),
-                    "published_date": item.get('broadcastDate', ''),
+                    "published_date": item.get('broadCastDate', ''),
                     "raw_metadata": item,
-                    "url": f"https://network.demandstar.com/bids/{item.get('id')}"
+                    "url": f"https://www.demandstar.com/app/bids/{item.get('id', '')}"
                 })
+            logging.info(f"DemandStar extraction successful. Found {len(bids)} bids.")
         except Exception as e:
             logging.error(f"Failed to intercept DemandStar: {e}")
 
@@ -85,7 +105,7 @@ class RFPDataIngestion:
         florida_portals = ["marioncountyfl", "alachuacounty", "cityoforlando"] 
         
         for portal in florida_portals:
-            # This is the standard unauthenticated public endpoint architecture for OpenGov
+            # NOTE: Update this URL with the exact AJAX endpoint from your browser's network tab once extracted
             url = f"https://procurement.opengov.com/api/public/projects?portal={portal}"
             
             try:
