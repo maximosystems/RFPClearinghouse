@@ -173,6 +173,13 @@ class DurmotIntelligence:
             r"\bmandatory pre-bid\b": 25,
             r"\bno substitutions\b": 30
         }
+        
+        # Custom IT/Enterprise Stack Keywords
+        self.target_tech_stack = [
+            r"\btyler technologies\b", r"\bcjis\b", r"\bgoogle atom\b", 
+            r"\baws\b", r"\bdocker\b", r"\bpostgresql\b", r"\bpython\b", 
+            r"\beam\b", r"\bgis\b", r"\bsaas\b"
+        ]
 
     def score_and_flag(self, rfp):
         search_text = f"{rfp['title']} {rfp['agency']} {json.dumps(rfp['raw_metadata'])}".lower()
@@ -187,11 +194,20 @@ class DurmotIntelligence:
                 wired_score += points
                 wired_flags.append(pattern.replace(r"\b", "").strip().title())
                 
+        # Target Tech Stack Alignment
+        stack_matches = []
+        for kw in self.target_tech_stack:
+            if re.search(kw, search_text):
+                stack_matches.append(kw.replace(r"\b", "").strip().upper())
+                
         wired_score = min(wired_score, 100)
         
         rfp['is_piggyback'] = is_piggyback
         rfp['wired_score'] = wired_score
         rfp['wired_flags'] = wired_flags
+        
+        # Inject the matched tech stack directly into the JSONB metadata
+        rfp['raw_metadata']['durmot_stack_matches'] = stack_matches
         return rfp
 
     def insert_to_postgres(self, rfp_list):
