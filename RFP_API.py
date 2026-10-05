@@ -101,8 +101,8 @@ class RFPDataIngestion:
         """
         logging.info("Bypassing OpenGov Public APIs...")
         
-        # List of targeted Florida county OpenGov portal slugs
-        florida_portals = ["marioncountyfl", "alachuacounty", "cityoforlando"] 
+        # List of targeted Florida county OpenGov portal slugs updated to active environments
+        florida_portals = ["orlando", "manateecounty", "citruscountyfl"] 
         
         for portal in florida_portals:
             # NOTE: Update this URL with the exact AJAX endpoint from your browser's network tab once extracted
