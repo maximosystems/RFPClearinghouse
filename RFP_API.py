@@ -24,7 +24,11 @@ class RFPDataIngestion:
         }
         self.rfp_master_list = []
 
-    def scrape_florida_clearinghouse(self, keyword="Information technology"):
+    def scrape_florida_clearinghouse(self, keywords=None):
+        if keywords is None:
+            # Query targeted IT implementation terms instead of generic 'Information'
+            keywords = ["software implementation", "system integration", "SaaS"]
+            
         logging.info("Starting Florida Clearinghouse Scrape...")
         url = "https://floridapublicnotices.com/" 
         headers = {
@@ -32,55 +36,58 @@ class RFPDataIngestion:
             "content-type": "application/json",
             "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36"
         }
-        payload = {
-            "counties": [],
-            "date-range--end-date": None,
-            "date-range--start-date": None,
-            "keywords": keyword,
-            "offset": None,
-            "paper": "-1",
-            "sort-by": None,
-            "limit": 100 
-        }
-        try:
-            response = requests.post(url, headers=headers, json=payload)
-            response.raise_for_status()
-            data = response.json()
-            
-            notices = []
-            if isinstance(data, list):
-                notices = data
-            elif isinstance(data, dict):
-                for key in ['results', 'data', 'notices', 'items']:
-                    if key in data and isinstance(data[key], list):
-                        notices = data[key]
-                        break
-                if not notices and '_embedded' in data and isinstance(data['_embedded'], dict):
-                    nested_lists = [v for v in data['_embedded'].values() if isinstance(v, list)]
-                    if nested_lists:
-                        notices = nested_lists[0]
 
-            for item in notices:
-                # Extract the hidden keys discovered in the JSON payload
-                agency = item.get('city', item.get('paper', 'Florida Public Notice'))
-                title = item.get('notice', 'Unknown Title')
-                notice_date = item.get('date', '')
+        for kw in keywords:
+            payload = {
+                "counties": [],
+                "date-range--end-date": None,
+                "date-range--start-date": None,
+                "keywords": kw,
+                "offset": None,
+                "paper": "-1",
+                "sort-by": None,
+                "limit": 100 
+            }
+            try:
+                response = requests.post(url, headers=headers, json=payload, timeout=10)
+                response.raise_for_status()
+                data = response.json()
                 
-                # Prioritize the direct PDF link if it exists
-                pdf_link = item.get('_links', {}).get('media', {}).get('href', '')
-                final_url = pdf_link if pdf_link else f"https://floridapublicnotices.com/notice/{item.get('id', '')}"
-                
-                self.rfp_master_list.append({
-                    "source": "FloridaPublicNotices",
-                    "title": title,
-                    "agency": agency,
-                    "published_date": notice_date,
-                    "raw_metadata": item,
-                    "url": final_url
-                })
-            logging.info(f"Florida Clearinghouse extraction successful. Found {len(notices)} notices.")
-        except Exception as e:
-            logging.error(f"Failed to scrape Florida Clearinghouse: {e}")
+                notices = []
+                if isinstance(data, list):
+                    notices = data
+                elif isinstance(data, dict):
+                    for key in ['results', 'data', 'notices', 'items']:
+                        if key in data and isinstance(data[key], list):
+                            notices = data[key]
+                            break
+                    if not notices and '_embedded' in data and isinstance(data['_embedded'], dict):
+                        nested_lists = [v for v in data['_embedded'].values() if isinstance(v, list)]
+                        if nested_lists:
+                            notices = nested_lists[0]
+
+                for item in notices:
+                    agency = item.get('city', item.get('paper', 'Florida Public Notice'))
+                    
+                    # Clean and clamp lengthy public notice text to keep table layout tight
+                    raw_title = item.get('notice', 'Unknown Title')
+                    title = (raw_title[:120] + '...') if len(raw_title) > 120 else raw_title
+                    
+                    notice_date = item.get('date', '')
+                    pdf_link = item.get('_links', {}).get('media', {}).get('href', '')
+                    final_url = pdf_link if pdf_link else f"https://floridapublicnotices.com/notice/{item.get('id', '')}"
+                    
+                    self.rfp_master_list.append({
+                        "source": "FloridaPublicNotices",
+                        "title": title,
+                        "agency": agency,
+                        "published_date": notice_date,
+                        "raw_metadata": item,
+                        "url": final_url
+                    })
+                logging.info(f"Florida Clearinghouse extraction for '{kw}' complete. Found {len(notices)} notices.")
+            except Exception as e:
+                logging.error(f"Failed to scrape Florida Clearinghouse for '{kw}': {e}")
 
     def intercept_demandstar_xhr(self):
         logging.info("Intercepting DemandStar XHR Feed...")
@@ -88,7 +95,6 @@ class RFPDataIngestion:
         headers = {
             "accept": "application/json",
             "content-type": "application/json",
-            "cookie": "_gcl_au=1.1.1200877539.1791220009; _gid=GA1.2.1930483286.1791220009; amp_53320e=x2XnAzd9U-xg3vBfOidt-w...1k46gggi8.1k46ggi7q.0.0.0; amp_53320e_demandstar.com=x2XnAzd9U-xg3vBfOidt-w...1k46gggi8.1k46ggi9g.0.0.0; _ga=GA1.2.30132793.1791220009; DemandStarToken=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1cyI6IjE5NDk3NTMiLCJtaSI6IjIzNzc4MDIiLCJwbWlkIjoiMCIsImZuIjoiTWF4IiwibG4iOiJDYXN0YW5lZGEiLCJtcyI6IkFDIiwibXQiOiJTUyIsIm1ncnRkIjoiVHJ1ZSIsImxrZCI6IkZhbHNlIiwibG0iOiIwIiwidW4iOiJNYXhDYXN0YW5lZGFJSUlAZ21haWwuY29tIiwidXQiOiJEUyIsImVtbCI6Im1heGNhc3RhbmVkYWlpaUBnbWFpbC5jb20iLCJwcm1zIjoiIDIsIDMsIDE0LCAxNSIsIm1sIjoiMiw0IiwibWMiOiJUcnVlIiwiZm1pIjoiMCIsImxsIjoiMTEvOC8yMDI0IDQ6NDg6MzkgUE0iLCJtY2QiOiIyLzYvMjAxOSA0OjUzOjAwIFBNIiwiYWNkIjoiMTAvNS8yMDI2IDU6MTI6MTAgUE0iLCJkbiI6IiIsInB0IjoiQUciLCJ0bSI6ImxpZ2h0X0RTIiwiaWF0IjoiMTc5MTIyMDMzMCIsIm1ibCI6IkZhbHNlIiwianRpIjoiN2EyNWNiZTEtMDg2Yi00MmE1LThmNGItODIxN2IyY2MyYjI1IiwibmJmIjoxNzkxMjIwMzMwLCJleHAiOjE3OTEzMDY3MzAsImlzcyI6IkRlbWFuZHN0YXIgQ29ycG9yYXRpb24ifQ.pO8a3RkafaN4nlYH5S-JsT3Zfm3ql3rwVFnC_kStRfk; MEMBERID=2377802; __cf_bm=kqKHYt34heN1e6tNQu7jxUeZTIk_uWZLNWlY4ZXthwc-1791221976.0147386-1.0.1.1-Gt7Xn4lBJvVwksIoiVRWtgDYKU_eUGwINlQJZMD783Kpb_dLGMuQIVo6JGX5HSIOpx0y0MdQqGoUG_2aLvUANLRky2nLXEA49i4zPmHzqLh6hrDvAPPBHFLLlp.b6TdA; _ga_QLPM2XWL45=GS2.1.s1791220009$o1$g1$t1791222383$j57$l0$h0; _gat_UA-177609458-1=1",
             "origin": "https://www.demandstar.com",
             "referer": "https://www.demandstar.com/",
             "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36"
@@ -102,10 +108,9 @@ class RFPDataIngestion:
             "commodityExists": True
         }
         try:
-            response = requests.post(url, headers=headers, json=payload)
+            response = requests.post(url, headers=headers, json=payload, timeout=10)
             response.raise_for_status()
             data = response.json()
-            
             bids = data.get('data', []) if isinstance(data, dict) else data
             
             for item in bids:
@@ -142,10 +147,9 @@ class RFPDataIngestion:
                 "sortDirection": "DESC"
             }
             try:
-                response = requests.post(url, headers=headers, json=payload)
+                response = requests.post(url, headers=headers, json=payload, timeout=10)
                 response.raise_for_status()
                 data = response.json()
-                
                 projects = data.get('data', []) if isinstance(data, dict) else data
                 
                 for item in projects:
@@ -165,7 +169,7 @@ class RFPDataIngestion:
         self.scrape_florida_clearinghouse()
         self.intercept_demandstar_xhr()
         self.bypass_opengov_api()
-        logging.info(f"Pipeline complete. Ingested {len(self.rfp_master_list)} total RFPs.")
+        logging.info(f"Pipeline complete. Ingested {len(self.rfp_master_list)} total raw records.")
         return json.dumps(self.rfp_master_list, indent=4)
 
 
@@ -173,11 +177,23 @@ class DurmotIntelligence:
     def __init__(self, db_url):
         self.db_url = db_url
         
+        # Disqualification: Exclude land, civil, auction, meeting, and zoning notices
+        self.disqualify_keywords = [
+            r"\bzoning\b", r"\bredevelopment\b", r"\breal property\b", 
+            r"\bland development\b", r"\bucc sale\b", r"\bauction\b", 
+            r"\bforeclosure\b", r"\bbcc meeting\b", r"\bboard meeting\b",
+            r"\bpublic hearing\b", r"\bordinance\b", r"\bvariance\b",
+            r"\bcomprehensive plan\b", r"\baffordable housing\b", r"\blien\b",
+            r"\bconstruction\b", r"\broofing\b", r"\bpaving\b", r"\bdemolition\b"
+        ]
+        
+        # Cooperative purchasing heuristics
         self.piggyback_keywords = [
             r"\bpiggyback\b", r"\bcooperative purchasing\b", r"\bomnia\b", 
             r"\bsourcewell\b", r"\bnaspo\b", r"\bstate term contract\b", r"\bgsa\b"
         ]
         
+        # Rigged / wired heuristics
         self.wired_heuristics = {
             r"\bsole source\b": 40,
             r"\bproprietary\b": 30,
@@ -187,32 +203,32 @@ class DurmotIntelligence:
             r"\bno substitutions\b": 30
         }
         
+        # Dedicated IT Implementation Stack
         self.target_tech_stack = [
-            r"\btyler technologies\b", r"\bcjis\b", r"\bgoogle atom\b", 
-            r"\baws\b", r"\bdocker\b", r"\bpostgresql\b", r"\bpython\b", 
-            r"\beam\b", r"\bgis\b", r"\bsaas\b"
+            r"\bsoftware implementation\b", r"\bsaas implementation\b",
+            r"\bsystem integration\b", r"\bsystems integration\b",
+            r"\bpower bi\b", r"\bserverless\b", r"\btyler technologies\b",
+            r"\bcjis\b", r"\bgoogle atom\b", r"\baws\b", r"\bdocker\b",
+            r"\bpostgresql\b", r"\bpython\b", r"\beam\b", r"\bgis\b",
+            r"\bsaas\b", r"\berp\b", r"\bcloud migration\b",
+            r"\betl\b", r"\bapi integration\b"
         ]
 
     def scrape_deep_text(self, url):
-        """Fetches HTML or PDF from the bid URL and strips it to plain text for deep scanning."""
         if not url: return ""
         try:
             headers = {'User-Agent': 'Mozilla/5.0'}
-            # Set a 10-second timeout to allow for PDF downloads
             res = requests.get(url, headers=headers, timeout=10)
             if res.status_code == 200:
-                # If the URL is a PDF or the server returns a PDF content type, read it with pypdf
                 if url.lower().endswith('.pdf') or 'application/pdf' in res.headers.get('Content-Type', '').lower():
                     reader = PdfReader(io.BytesIO(res.content))
                     text = ""
-                    # Read up to the first 15 pages to catch tech specs without hanging the server
                     for page in reader.pages[:15]:
                         extracted = page.extract_text()
                         if extracted:
                             text += extracted + " "
                     return text.lower()
                 else:
-                    # Otherwise, fall back to standard HTML parsing
                     soup = BeautifulSoup(res.text, 'html.parser')
                     return soup.get_text(separator=' ', strip=True).lower()
         except Exception:
@@ -244,6 +260,11 @@ class DurmotIntelligence:
         deep_text = self.scrape_deep_text(rfp.get('url', ''))
         search_text = f"{rfp['title']} {rfp['agency']} {json.dumps(rfp['raw_metadata'])} {deep_text}".lower()
         
+        # Discard non-IT solicitations immediately
+        for pattern in self.disqualify_keywords:
+            if re.search(pattern, search_text):
+                return None  # Dropped from ingestion
+                
         is_piggyback = any(re.search(kw, search_text) for kw in self.piggyback_keywords)
         
         wired_score = 0
@@ -273,14 +294,20 @@ class DurmotIntelligence:
         return rfp
 
     def insert_to_postgres(self, rfp_list):
-        logging.info("Connecting to PostgreSQL to insert intelligence data. This may take longer due to deep page and PDF scraping...")
+        logging.info("Connecting to PostgreSQL to filter and insert intelligence data...")
         try:
             conn = psycopg2.connect(self.db_url)
             cursor = conn.cursor()
             
             inserted_count = 0
+            dropped_count = 0
             for raw_rfp in rfp_list:
                 rfp = self.score_and_flag(raw_rfp)
+                
+                # Skip records dropped by the disqualification filter
+                if not rfp:
+                    dropped_count += 1
+                    continue
                 
                 insert_query = """
                     INSERT INTO durmot_rfp_intelligence 
@@ -309,7 +336,7 @@ class DurmotIntelligence:
             conn.commit()
             cursor.close()
             conn.close()
-            logging.info(f"Database insertion complete. Added {inserted_count} new RFPs.")
+            logging.info(f"Database insertion complete. Qualified: {inserted_count} RFPs | Disqualified non-IT: {dropped_count} notices.")
             
         except Exception as e:
             logging.error(f"PostgreSQL Insertion Failed: {e}")
@@ -327,23 +354,29 @@ DASHBOARD_HTML = """
     <style>
         body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background-color: #0d1117; color: #c9d1d9; margin: 0; padding: 20px; }
         h1 { border-bottom: 1px solid #30363d; padding-bottom: 10px; }
-        table { width: 100%; border-collapse: collapse; margin-top: 20px; background-color: #161b22; border-radius: 6px; overflow: hidden; }
-        th, td { padding: 12px 15px; text-align: left; border-bottom: 1px solid #30363d; }
+        table { width: 100%; border-collapse: collapse; margin-top: 20px; background-color: #161b22; border-radius: 6px; overflow: hidden; table-layout: fixed; }
+        th, td { padding: 12px 15px; text-align: left; border-bottom: 1px solid #30363d; word-wrap: break-word; }
         th { background-color: #21262d; font-weight: bold; }
+        th:nth-child(1) { width: 15%; }
+        th:nth-child(2) { width: 35%; }
+        th:nth-child(3) { width: 10%; }
+        th:nth-child(4) { width: 15%; }
+        th:nth-child(5) { width: 15%; }
+        th:nth-child(6) { width: 10%; }
         tr:hover { background-color: #30363d; }
         a { color: #58a6ff; text-decoration: none; }
         a:hover { text-decoration: underline; }
         .score { font-weight: bold; }
         .score-high { color: #f85149; }
         .score-low { color: #3fb950; }
-        .badge { background-color: #b31d28; color: white; padding: 3px 8px; border-radius: 12px; font-size: 11px; margin-right: 4px; display: inline-block; }
+        .badge { background-color: #b31d28; color: white; padding: 3px 8px; border-radius: 12px; font-size: 11px; margin-right: 4px; display: inline-block; margin-bottom: 3px; }
         .badge-tech { background-color: #1f6feb; }
         .btn { display: inline-block; background-color: #238636; color: white; padding: 10px 15px; text-decoration: none; border-radius: 6px; font-weight: bold; margin-bottom: 20px; }
         .btn:hover { background-color: #2ea043; }
     </style>
 </head>
 <body>
-    <h1>Durmot Intelligence Engine</h1>
+    <h1>Durmot Intelligence Engine - Enterprise IT & Implementations</h1>
     <a href="/run-scraper" class="btn">Trigger Scraping Pipeline</a>
     
     <table>
@@ -380,7 +413,6 @@ DASHBOARD_HTML = """
 
 @app.route('/')
 def dashboard():
-    """Serves the dashboard directly from PostgreSQL."""
     try:
         conn = psycopg2.connect(DATABASE_URL)
         cursor = conn.cursor()
@@ -407,7 +439,6 @@ def dashboard():
 
 @app.route('/run-scraper')
 def trigger_scraper():
-    """Triggers the ingestion pipeline in the background so the web page doesn't freeze."""
     def run_pipeline():
         try:
             pipeline = RFPDataIngestion()
