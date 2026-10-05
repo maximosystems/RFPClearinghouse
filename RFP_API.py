@@ -6,6 +6,8 @@ import requests
 import psycopg2
 from psycopg2.extras import Json
 from datetime import datetime
+from dateutil import parser
+from bs4 import BeautifulSoup
 
 # Configure logging for Railway/Durmot monitoring
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -158,13 +160,11 @@ class DurmotIntelligence:
     def __init__(self, db_url):
         self.db_url = db_url
         
-        # Piggyback / Cooperative Purchasing Keywords
         self.piggyback_keywords = [
             r"\bpiggyback\b", r"\bcooperative purchasing\b", r"\bomnia\b", 
             r"\bsourcewell\b", r"\bnaspo\b", r"\bstate term contract\b", r"\bgsa\b"
         ]
         
-        # Wired Bid / Restrictive Language Heuristics
         self.wired_heuristics = {
             r"\bsole source\b": 40,
             r"\bproprietary\b": 30,
@@ -174,25 +174,71 @@ class DurmotIntelligence:
             r"\bno substitutions\b": 30
         }
         
-        # Custom IT/Enterprise Stack Keywords
         self.target_tech_stack = [
             r"\btyler technologies\b", r"\bcjis\b", r"\bgoogle atom\b", 
             r"\baws\b", r"\bdocker\b", r"\bpostgresql\b", r"\bpython\b", 
             r"\beam\b", r"\bgis\b", r"\bsaas\b"
         ]
 
+    def scrape_deep_text(self, url):
+        """Fetches HTML from the bid URL and strips it to plain text for deep scanning."""
+        if not url: return ""
+        try:
+            headers = {'User-Agent': 'Mozilla/5.0'}
+            # Set a 5-second timeout so a dead link doesn't hang the whole pipeline
+            res = requests.get(url, headers=headers, timeout=5)
+            if res.status_code == 200:
+                soup = BeautifulSoup(res.text, 'html.parser')
+                return soup.get_text(separator=' ', strip=True).lower()
+        except Exception:
+            pass
+        return ""
+
+    def evaluate_temporal_anomaly(self, rfp):
+        """Calculates the delta between publish date and deadline."""
+        pub_date_str = rfp.get('published_date')
+        deadline_str = None
+        
+        # Extract the deadline from the raw metadata payload based on the source
+        if "OpenGov" in rfp['source']:
+            deadline_str = rfp['raw_metadata'].get('proposalDeadline')
+        elif rfp['source'] == "DemandStar":
+            deadline_str = rfp['raw_metadata'].get('dueDate')
+            
+        if pub_date_str and deadline_str:
+            try:
+                # Remove timezone info to do clean math
+                pub_date = parser.parse(pub_date_str).replace(tzinfo=None)
+                deadline = parser.parse(deadline_str).replace(tzinfo=None)
+                
+                delta_days = (deadline - pub_date).days
+                if 0 <= delta_days < 14:
+                    return 35, f"Suspiciously Short Deadline ({delta_days} Days)"
+            except Exception:
+                pass
+        return 0, None
+
     def score_and_flag(self, rfp):
-        search_text = f"{rfp['title']} {rfp['agency']} {json.dumps(rfp['raw_metadata'])}".lower()
+        # 1. Path 1: Scrape the deep page text
+        deep_text = self.scrape_deep_text(rfp.get('url', ''))
+        search_text = f"{rfp['title']} {rfp['agency']} {json.dumps(rfp['raw_metadata'])} {deep_text}".lower()
         
         is_piggyback = any(re.search(kw, search_text) for kw in self.piggyback_keywords)
         
         wired_score = 0
         wired_flags = []
         
+        # Regex heuristics
         for pattern, points in self.wired_heuristics.items():
             if re.search(pattern, search_text):
                 wired_score += points
                 wired_flags.append(pattern.replace(r"\b", "").strip().title())
+                
+        # 2. Path 2: Calculate the date math
+        temporal_score, temporal_flag = self.evaluate_temporal_anomaly(rfp)
+        if temporal_flag:
+            wired_score += temporal_score
+            wired_flags.append(temporal_flag)
                 
         # Target Tech Stack Alignment
         stack_matches = []
@@ -205,13 +251,11 @@ class DurmotIntelligence:
         rfp['is_piggyback'] = is_piggyback
         rfp['wired_score'] = wired_score
         rfp['wired_flags'] = wired_flags
-        
-        # Inject the matched tech stack directly into the JSONB metadata
-        rfp['raw_metadata']['durmot_stack_matches'] = stack_matches
+        rfp['raw_metadata']['durmot_stack_matches'] = list(set(stack_matches)) # Deduplicate hits
         return rfp
 
     def insert_to_postgres(self, rfp_list):
-        logging.info("Connecting to PostgreSQL to insert intelligence data...")
+        logging.info("Connecting to PostgreSQL to insert intelligence data. This may take longer due to deep page scraping...")
         try:
             conn = psycopg2.connect(self.db_url)
             cursor = conn.cursor()
@@ -254,12 +298,10 @@ class DurmotIntelligence:
 
 
 if __name__ == "__main__":
-    # 1. Run the existing ingestion pipeline
     pipeline = RFPDataIngestion()
     rfp_json_string = pipeline.execute_pipeline()
     master_rfp_list = json.loads(rfp_json_string)
     
-    # 2. Run the intelligence and database insertion layer
     DATABASE_URL = os.environ.get("DATABASE_URL", "postgresql://user:password@localhost:5432/durmot")
     
     intelligence_engine = DurmotIntelligence(DATABASE_URL)
