@@ -3,11 +3,13 @@ import re
 import json
 import logging
 import requests
+import threading
 import psycopg2
 from psycopg2.extras import Json
 from datetime import datetime
 from dateutil import parser
 from bs4 import BeautifulSoup
+from flask import Flask, render_template_string
 
 # Configure logging for Railway/Durmot monitoring
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -181,11 +183,9 @@ class DurmotIntelligence:
         ]
 
     def scrape_deep_text(self, url):
-        """Fetches HTML from the bid URL and strips it to plain text for deep scanning."""
         if not url: return ""
         try:
             headers = {'User-Agent': 'Mozilla/5.0'}
-            # Set a 5-second timeout so a dead link doesn't hang the whole pipeline
             res = requests.get(url, headers=headers, timeout=5)
             if res.status_code == 200:
                 soup = BeautifulSoup(res.text, 'html.parser')
@@ -195,11 +195,9 @@ class DurmotIntelligence:
         return ""
 
     def evaluate_temporal_anomaly(self, rfp):
-        """Calculates the delta between publish date and deadline."""
         pub_date_str = rfp.get('published_date')
         deadline_str = None
         
-        # Extract the deadline from the raw metadata payload based on the source
         if "OpenGov" in rfp['source']:
             deadline_str = rfp['raw_metadata'].get('proposalDeadline')
         elif rfp['source'] == "DemandStar":
@@ -207,7 +205,6 @@ class DurmotIntelligence:
             
         if pub_date_str and deadline_str:
             try:
-                # Remove timezone info to do clean math
                 pub_date = parser.parse(pub_date_str).replace(tzinfo=None)
                 deadline = parser.parse(deadline_str).replace(tzinfo=None)
                 
@@ -219,7 +216,6 @@ class DurmotIntelligence:
         return 0, None
 
     def score_and_flag(self, rfp):
-        # 1. Path 1: Scrape the deep page text
         deep_text = self.scrape_deep_text(rfp.get('url', ''))
         search_text = f"{rfp['title']} {rfp['agency']} {json.dumps(rfp['raw_metadata'])} {deep_text}".lower()
         
@@ -228,19 +224,16 @@ class DurmotIntelligence:
         wired_score = 0
         wired_flags = []
         
-        # Regex heuristics
         for pattern, points in self.wired_heuristics.items():
             if re.search(pattern, search_text):
                 wired_score += points
                 wired_flags.append(pattern.replace(r"\b", "").strip().title())
                 
-        # 2. Path 2: Calculate the date math
         temporal_score, temporal_flag = self.evaluate_temporal_anomaly(rfp)
         if temporal_flag:
             wired_score += temporal_score
             wired_flags.append(temporal_flag)
                 
-        # Target Tech Stack Alignment
         stack_matches = []
         for kw in self.target_tech_stack:
             if re.search(kw, search_text):
@@ -251,7 +244,7 @@ class DurmotIntelligence:
         rfp['is_piggyback'] = is_piggyback
         rfp['wired_score'] = wired_score
         rfp['wired_flags'] = wired_flags
-        rfp['raw_metadata']['durmot_stack_matches'] = list(set(stack_matches)) # Deduplicate hits
+        rfp['raw_metadata']['durmot_stack_matches'] = list(set(stack_matches)) 
         return rfp
 
     def insert_to_postgres(self, rfp_list):
@@ -297,12 +290,113 @@ class DurmotIntelligence:
             logging.error(f"PostgreSQL Insertion Failed: {e}")
 
 
+# --- FLASK DASHBOARD SERVER ---
+app = Flask(__name__)
+DATABASE_URL = os.environ.get("DATABASE_URL", "postgresql://user:password@localhost:5432/durmot")
+
+DASHBOARD_HTML = """
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Durmot Intelligence Dashboard</title>
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background-color: #0d1117; color: #c9d1d9; margin: 0; padding: 20px; }
+        h1 { border-bottom: 1px solid #30363d; padding-bottom: 10px; }
+        table { width: 100%; border-collapse: collapse; margin-top: 20px; background-color: #161b22; border-radius: 6px; overflow: hidden; }
+        th, td { padding: 12px 15px; text-align: left; border-bottom: 1px solid #30363d; }
+        th { background-color: #21262d; font-weight: bold; }
+        tr:hover { background-color: #30363d; }
+        a { color: #58a6ff; text-decoration: none; }
+        a:hover { text-decoration: underline; }
+        .score { font-weight: bold; }
+        .score-high { color: #f85149; }
+        .score-low { color: #3fb950; }
+        .badge { background-color: #b31d28; color: white; padding: 3px 8px; border-radius: 12px; font-size: 11px; margin-right: 4px; display: inline-block; }
+        .badge-tech { background-color: #1f6feb; }
+        .btn { display: inline-block; background-color: #238636; color: white; padding: 10px 15px; text-decoration: none; border-radius: 6px; font-weight: bold; margin-bottom: 20px; }
+        .btn:hover { background-color: #2ea043; }
+    </style>
+</head>
+<body>
+    <h1>Durmot Intelligence Engine</h1>
+    <a href="/run-scraper" class="btn">Trigger Scraping Pipeline</a>
+    
+    <table>
+        <tr>
+            <th>Agency</th>
+            <th>RFP Title</th>
+            <th>Wired Score</th>
+            <th>Risk Flags</th>
+            <th>Tech Stack Matches</th>
+            <th>Link</th>
+        </tr>
+        {% for row in bids %}
+        <tr>
+            <td>{{ row[0] }}</td>
+            <td>{{ row[1] }}</td>
+            <td class="score {% if row[3] > 30 %}score-high{% else %}score-low{% endif %}">{{ row[3] }}</td>
+            <td>
+                {% for flag in row[4] %}
+                    <span class="badge">{{ flag }}</span>
+                {% endfor %}
+            </td>
+            <td>
+                {% for tech in row[5] %}
+                    <span class="badge badge-tech">{{ tech }}</span>
+                {% endfor %}
+            </td>
+            <td><a href="{{ row[6] }}" target="_blank">View RFP</a></td>
+        </tr>
+        {% endfor %}
+    </table>
+</body>
+</html>
+"""
+
+@app.route('/')
+def dashboard():
+    """Serves the dashboard directly from PostgreSQL."""
+    try:
+        conn = psycopg2.connect(DATABASE_URL)
+        cursor = conn.cursor()
+        query = """
+            SELECT 
+                agency, 
+                title, 
+                is_piggyback,
+                wired_score,
+                COALESCE(wired_flags, '{}') AS wired_flags,
+                COALESCE(raw_metadata->'durmot_stack_matches', '[]') AS tech_stack_hits,
+                url
+            FROM durmot_rfp_intelligence 
+            ORDER BY wired_score DESC, ingested_at DESC
+            LIMIT 200;
+        """
+        cursor.execute(query)
+        bids = cursor.fetchall()
+        cursor.close()
+        conn.close()
+        return render_template_string(DASHBOARD_HTML, bids=bids)
+    except Exception as e:
+        return f"<h3 style='color:red;'>Database Error: {e}</h3>"
+
+@app.route('/run-scraper')
+def trigger_scraper():
+    """Triggers the ingestion pipeline in the background so the web page doesn't freeze."""
+    def run_pipeline():
+        try:
+            pipeline = RFPDataIngestion()
+            rfp_json_string = pipeline.execute_pipeline()
+            master_rfp_list = json.loads(rfp_json_string)
+            intelligence_engine = DurmotIntelligence(DATABASE_URL)
+            intelligence_engine.insert_to_postgres(master_rfp_list)
+        except Exception as e:
+            logging.error(f"Background scraping failed: {e}")
+            
+    thread = threading.Thread(target=run_pipeline)
+    thread.start()
+    return "<h3>Pipeline triggered in the background! <a href='/'>Return to Dashboard</a></h3>"
+
 if __name__ == "__main__":
-    pipeline = RFPDataIngestion()
-    rfp_json_string = pipeline.execute_pipeline()
-    master_rfp_list = json.loads(rfp_json_string)
-    
-    DATABASE_URL = os.environ.get("DATABASE_URL", "postgresql://user:password@localhost:5432/durmot")
-    
-    intelligence_engine = DurmotIntelligence(DATABASE_URL)
-    intelligence_engine.insert_to_postgres(master_rfp_list)
+    port = int(os.environ.get("PORT", 8080))
+    app.run(host='0.0.0.0', port=port)
