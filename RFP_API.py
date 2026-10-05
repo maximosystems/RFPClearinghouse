@@ -37,7 +37,7 @@ class RFPDataIngestion:
             "offset": None,
             "paper": "-1",
             "sort-by": None,
-            "limit": 100  # Increased from 12 to pull a deeper backlog
+            "limit": 100 
         }
         
         try:
@@ -45,7 +45,6 @@ class RFPDataIngestion:
             response.raise_for_status()
             data = response.json()
             
-            # Robust parsing: HAL+JSON often nests data uniquely (e.g., inside '_embedded' or 'data')
             notices = []
             if isinstance(data, list):
                 notices = data
@@ -55,7 +54,6 @@ class RFPDataIngestion:
                         notices = data[key]
                         break
                 if not notices and '_embedded' in data and isinstance(data['_embedded'], dict):
-                    # Extract the first list found inside the _embedded HAL object
                     nested_lists = [v for v in data['_embedded'].values() if isinstance(v, list)]
                     if nested_lists:
                         notices = nested_lists[0]
@@ -123,29 +121,50 @@ class RFPDataIngestion:
     def bypass_opengov_api(self):
         """
         Target: OpenGov / ProcureNow Public Vendor Portals
-        Loops through unauthenticated JSON feeds for known Florida county portals.
+        Posts directly to the modern v1 public API architecture.
         """
         logging.info("Bypassing OpenGov Public APIs...")
         
         florida_portals = ["orlando", "manateecounty", "citruscountyfl"] 
         
+        headers = {
+            "accept": "*/*",
+            "content-type": "application/json",
+            "origin": "https://procurement.opengov.com",
+            "referer": "https://procurement.opengov.com/",
+            "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36"
+        }
+        
         for portal in florida_portals:
-            url = f"https://procurement.opengov.com/api/public/projects?portal={portal}"
+            url = f"https://api.procurement.opengov.com/api/v1/government/{portal}/project/public"
+            
+            payload = {
+                "filters": [{"type": "status", "value": "all"}],
+                "quickSearchQuery": None,
+                "limit": 100,
+                "page": 1,
+                "sortField": "proposalDeadline",
+                "sortDirection": "DESC"
+            }
             
             try:
-                response = requests.get(url, headers=self.headers)
+                response = requests.post(url, headers=headers, json=payload)
                 response.raise_for_status()
                 data = response.json()
                 
-                for item in data:
+                # The data array is usually at the root or under 'data'/'projects'
+                projects = data.get('data', []) if isinstance(data, dict) else data
+                
+                for item in projects:
                     self.rfp_master_list.append({
                         "source": f"OpenGov-{portal}",
-                        "title": item.get('title', 'Unknown Title'),
+                        "title": item.get('title', item.get('name', 'Unknown Title')),
                         "agency": portal,
-                        "published_date": item.get('publishedAt', ''),
+                        "published_date": item.get('publishedAt', item.get('releaseDate', '')),
                         "raw_metadata": item,
-                        "url": f"https://procurement.opengov.com/portal/{portal}/projects/{item.get('id')}"
+                        "url": f"https://procurement.opengov.com/portal/{portal}/projects/{item.get('id')}" if item.get('id') else f"https://procurement.opengov.com/portal/{portal}"
                     })
+                logging.info(f"OpenGov extraction successful for {portal}. Found {len(projects)} bids.")
             except Exception as e:
                 logging.error(f"Failed to fetch OpenGov portal {portal}: {e}")
 
