@@ -63,41 +63,45 @@ class RFPDataIngestion:
             else:
                 headers["authorization"] = auth_token if auth_token.startswith("Bearer ") else f"Bearer {auth_token}"
 
-        # FIXED PAYLOAD: Added 'externalBids' back so it searches outside your empty subscription list
-        payload = {
-            "showBids": "externalBids",
-            "bidStatus": "AC",
-            "includeExternalBids": "true",
-            "sortBy": "broadCastDate",
-            "sortOrder": "DESC",
-            "page": 1,
-            "limit": 200
-        }
-        try:
-            response = requests.post(url, headers=headers, json=payload, timeout=12)
-            response.raise_for_status()
-            data = response.json()
-            bids = data.get('data', []) if isinstance(data, dict) else data
-            
-            for item in bids:
-                self.rfp_master_list.append({
-                    "source": "DemandStar",
-                    "title": item.get('bidName', 'Unknown Title'),
-                    "agency": item.get('agencyName', 'Unknown Agency'),
-                    "published_date": item.get('broadCastDate', ''),
-                    "raw_metadata": item,
-                    "url": f"https://www.demandstar.com/app/bids/{item.get('id', '')}"
-                })
-            logging.info(f"DemandStar extraction successful. Found {len(bids)} bids.")
-        except Exception as e:
-            logging.error(f"Failed to intercept DemandStar: {e}")
+        search_terms = ["software", "erp", "system", "technology", "billing", "implementation"]
+        
+        for term in search_terms:
+            payload = {
+                "searchKeyword": term,
+                "showBids": "externalBids",
+                "bidStatus": "AC",
+                "includeExternalBids": "true",
+                "sortBy": "broadCastDate",
+                "sortOrder": "DESC",
+                "page": 1,
+                "limit": 50
+            }
+            try:
+                response = requests.post(url, headers=headers, json=payload, timeout=12)
+                if response.status_code == 200:
+                    data = response.json()
+                    bids = data.get('data', []) if isinstance(data, dict) else data
+                    
+                    for item in bids:
+                        self.rfp_master_list.append({
+                            "source": f"DemandStar-{term}",
+                            "title": item.get('bidName', 'Unknown Title'),
+                            "agency": item.get('agencyName', 'Unknown Agency'),
+                            "published_date": item.get('broadCastDate', ''),
+                            "raw_metadata": item,
+                            "url": f"https://www.demandstar.com/app/bids/{item.get('id', '')}"
+                        })
+                    logging.info(f"DemandStar extraction for '{term}': Found {len(bids)} bids.")
+                else:
+                    logging.warning(f"DemandStar returned {response.status_code} for term '{term}'")
+            except Exception as e:
+                logging.error(f"Failed to query DemandStar for '{term}': {e}")
 
     def bypass_opengov_api(self):
         logging.info("Bypassing OpenGov Public APIs...")
         florida_portals = [
-            "orlando", "citrusfl", "colliercountyfl", "sarasotacountyfl",
-            "cityofgainesville", "tamarac", "cityofdelraybeach", "northportfl",
-            "cityofsanfordfl", "palmbachcountyfl"
+            "orlando", "citrusfl", "cityofgainesville", 
+            "fortlauderdale", "daytonabeach"
         ]
         
         headers = {
@@ -110,12 +114,11 @@ class RFPDataIngestion:
         
         for portal in florida_portals:
             url = f"https://api.procurement.opengov.com/api/v1/government/{portal}/project/public"
-            # FIXED PAYLOAD: Reverted to "all" to prevent 400 Bad Request API rejections
             payload = {
-                "filters": [{"type": "status", "value": "all"}],
+                "filters": [],
                 "limit": 100,
                 "page": 1,
-                "sortField": "proposalDeadline",
+                "sortField": "publishedAt",
                 "sortDirection": "DESC"
             }
             try:
@@ -198,12 +201,8 @@ class DurmotIntelligence:
             r"\bsubcontracting goal\b"
         ]
         
-        self.piggyback_keywords = [
-            r"\bpiggyback\b", r"\bcooperative purchasing\b", r"\bomnia\b", 
-            r"\bsourcewell\b", r"\bnaspo\b", r"\bstate term contract\b", r"\bgsa\b"
-        ]
-        
-        self.wired_heuristics = {
+        # We look for these to measure market resistance
+        self.friction_heuristics = {
             r"\bsole source\b": 40,
             r"\bproprietary\b": 30,
             r"\bbrand name only\b": 35,
@@ -262,43 +261,42 @@ class DurmotIntelligence:
             if re.search(pattern, search_text):
                 return None  
                 
-        is_piggyback = any(re.search(kw, search_text) for kw in self.piggyback_keywords)
-        
-        wired_score = 0
-        wired_flags = []
+        friction_score = 0
+        friction_flags = []
         
         if any(re.search(kw, search_text) for kw in self.diversity_keywords):
-            wired_flags.append("MBWE/CBE Set-Aside")
+            friction_flags.append("MBWE/CBE Set-Aside")
         
-        for pattern, points in self.wired_heuristics.items():
+        for pattern, points in self.friction_heuristics.items():
             if re.search(pattern, search_text):
-                wired_score += points
-                wired_flags.append(pattern.replace(r"\b", "").strip().title())
+                friction_score += points
+                friction_flags.append(pattern.replace(r"\b", "").strip().title())
                 
         temporal_score, temporal_flag = self.evaluate_temporal_anomaly(rfp)
         if temporal_flag:
-            wired_score += temporal_score
-            wired_flags.append(temporal_flag)
+            friction_score += temporal_score
+            friction_flags.append(temporal_flag)
                 
         stack_matches = []
         for kw in self.target_tech_stack:
             if re.search(kw, search_text):
                 stack_matches.append(kw.replace(r"\b", "").strip().upper())
                 
-        wired_score = min(wired_score, 100)
+        friction_score = min(friction_score, 100)
         
-        rfp['is_piggyback'] = is_piggyback
-        rfp['wired_score'] = wired_score
-        rfp['wired_flags'] = wired_flags
+        rfp['friction_score'] = friction_score
+        rfp['friction_flags'] = friction_flags
         rfp['raw_metadata']['durmot_stack_matches'] = list(set(stack_matches)) 
         return rfp
 
     def process_results(self, rfp_list):
         logging.info("Processing and filtering intelligence data in memory...")
         
+        unique_rfps = {item['title']: item for item in rfp_list}.values()
+        
         processed_bids = []
         dropped_count = 0
-        for raw_rfp in rfp_list:
+        for raw_rfp in unique_rfps:
             rfp = self.score_and_flag(raw_rfp)
             
             if not rfp:
@@ -308,13 +306,14 @@ class DurmotIntelligence:
             processed_bids.append({
                 "agency": rfp['agency'],
                 "title": rfp['title'],
-                "wired_score": rfp['wired_score'],
-                "wired_flags": rfp['wired_flags'],
+                "friction_score": rfp['friction_score'],
+                "friction_flags": rfp['friction_flags'],
                 "tech_stack_hits": rfp['raw_metadata'].get('durmot_stack_matches', []),
                 "url": rfp['url']
             })
             
-        processed_bids.sort(key=lambda x: x['wired_score'], reverse=True)
+        # SORT FLIP: Lowest friction score (0) goes to the very top.
+        processed_bids.sort(key=lambda x: x['friction_score'])
         
         final_status = f"Last run successful. Qualified: {len(processed_bids)} RFPs | Disqualified Physical/Non-IT: {dropped_count} notices."
         set_state(final_status, processed_bids)
@@ -328,7 +327,7 @@ DASHBOARD_HTML = """
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Durmot Intelligence Dashboard</title>
+    <title>Durmot Lead Engine - Open IT Procurement</title>
     <style>
         body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background-color: #0d1117; color: #c9d1d9; margin: 0; padding: 20px; }
         h1 { border-bottom: 1px solid #30363d; padding-bottom: 10px; }
@@ -338,17 +337,18 @@ DASHBOARD_HTML = """
         th:nth-child(1) { width: 15%; }
         th:nth-child(2) { width: 35%; }
         th:nth-child(3) { width: 10%; }
-        th:nth-child(4) { width: 15%; }
-        th:nth-child(5) { width: 15%; }
+        th:nth-child(4) { width: 20%; }
+        th:nth-child(5) { width: 10%; }
         th:nth-child(6) { width: 10%; }
         tr:hover { background-color: #30363d; }
         a { color: #58a6ff; text-decoration: none; }
         a:hover { text-decoration: underline; }
         .score { font-weight: bold; }
-        .score-high { color: #f85149; }
-        .score-low { color: #3fb950; }
+        .score-high { color: #f85149; } /* Red for High Friction */
+        .score-low { color: #3fb950; }  /* Green for Zero Friction */
         .badge { background-color: #b31d28; color: white; padding: 3px 8px; border-radius: 12px; font-size: 11px; margin-right: 4px; display: inline-block; margin-bottom: 3px; }
         .badge-tech { background-color: #1f6feb; }
+        .badge-clean { background-color: #238636; }
         .btn { display: inline-block; background-color: #238636; color: white; padding: 10px 15px; text-decoration: none; border-radius: 6px; font-weight: bold; margin-bottom: 5px; cursor: pointer; border: none; font-size: 14px;}
         .btn:hover { background-color: #2ea043; }
         .status-box { background-color: #21262d; padding: 10px; border-radius: 6px; border-left: 4px solid #58a6ff; margin-bottom: 20px; font-size: 14px; }
@@ -393,8 +393,8 @@ DASHBOARD_HTML = """
     </script>
 </head>
 <body>
-    <h1>Durmot Intelligence Engine - Utility IT & Advisory</h1>
-    <button id="scrape-btn" class="btn" onclick="triggerScrape()">Trigger Scraping Pipeline (Live Search)</button>
+    <h1>Durmot Lead Engine - Open IT Procurement</h1>
+    <button id="scrape-btn" class="btn" onclick="triggerScrape()">Pull Latest SaaS & IT Leads</button>
     
     <div class="status-box" id="status-text">
         <strong>Status:</strong> {{ status }}
@@ -404,8 +404,8 @@ DASHBOARD_HTML = """
         <tr>
             <th>Agency</th>
             <th>RFP Title</th>
-            <th>Wired Score</th>
-            <th>Opportunity / Risk Flags</th>
+            <th>Friction Score</th>
+            <th>Market Opportunity / Risk Flags</th>
             <th>Tech Stack Matches</th>
             <th>Link</th>
         </tr>
@@ -413,9 +413,12 @@ DASHBOARD_HTML = """
         <tr>
             <td>{{ row.agency }}</td>
             <td>{{ row.title }}</td>
-            <td class="score {% if row.wired_score > 30 %}score-high{% else %}score-low{% endif %}">{{ row.wired_score }}</td>
+            <td class="score {% if row.friction_score == 0 %}score-low{% else %}score-high{% endif %}">{{ row.friction_score }}</td>
             <td>
-                {% for flag in row.wired_flags %}
+                {% if row.friction_score == 0 %}
+                    <span class="badge badge-clean">Prime Lead - Open Bid</span>
+                {% endif %}
+                {% for flag in row.friction_flags %}
                     <span class="badge" {% if flag == 'MBWE/CBE Set-Aside' %}style="background-color: #8957e5;"{% endif %}>{{ flag }}</span>
                 {% endfor %}
             </td>
