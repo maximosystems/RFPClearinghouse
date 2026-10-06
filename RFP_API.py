@@ -363,7 +363,7 @@ DASHBOARD_HTML = """
         .status-box { background-color: #21262d; padding: 10px; border-radius: 6px; border-left: 4px solid #58a6ff; margin-bottom: 20px; font-size: 14px; }
     </style>
     <script>
-        function triggerScrape() {
+        function startPolling() {
             const btn = document.getElementById('scrape-btn');
             const statusText = document.getElementById('status-text');
             
@@ -371,26 +371,35 @@ DASHBOARD_HTML = """
             btn.style.pointerEvents = "none";
             btn.style.opacity = "0.6";
             
-            // Trigger the backend process
+            const pollInterval = setInterval(() => {
+                fetch('/status')
+                    .then(res => res.json())
+                    .then(data => {
+                        statusText.innerHTML = "<strong>Status:</strong> " + data.status;
+                        if (!data.status.includes("Scraping in progress")) {
+                            clearInterval(pollInterval);
+                            btn.innerText = "Refresh Complete! Reloading Data...";
+                            window.location.reload();
+                        }
+                    });
+            }, 5000);
+        }
+
+        function triggerScrape() {
             fetch('/run-scraper')
                 .then(response => response.json())
                 .then(data => {
-                    // Poll for status updates every 5 seconds
-                    const pollInterval = setInterval(() => {
-                        fetch('/status')
-                            .then(res => res.json())
-                            .then(data => {
-                                statusText.innerHTML = "<strong>Status:</strong> " + data.status;
-                                // If status no longer says 'Scraping in progress', it's done
-                                if (!data.status.includes("Scraping in progress")) {
-                                    clearInterval(pollInterval);
-                                    btn.innerText = "Refresh Complete! Reloading Data...";
-                                    window.location.reload();
-                                }
-                            });
-                    }, 5000);
+                    startPolling();
                 });
         }
+
+        // Auto-reconnect the poller if the user refreshes the page mid-scrape
+        window.onload = function() {
+            const currentStatus = document.getElementById('status-text').innerText;
+            if (currentStatus.includes("Scraping in progress")) {
+                startPolling();
+            }
+        };
     </script>
 </head>
 <body>
