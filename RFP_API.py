@@ -26,7 +26,8 @@ class RFPDataIngestion:
 
     def scrape_florida_clearinghouse(self, keywords=None):
         if keywords is None:
-            keywords = ["software implementation", "system integration", "SaaS"]
+            # Tuned specifically for utility software and advisory
+            keywords = ["utility billing", "customer information", "software implementation", "system integration", "ERP"]
             
         logging.info("Starting Florida Clearinghouse Scrape...")
         url = "https://floridapublicnotices.com/" 
@@ -175,23 +176,48 @@ class DurmotIntelligence:
     def __init__(self, db_url):
         self.db_url = db_url
         
-        # Aggressive filter to drop civil, legal, and environmental noise
+        # Millennium Custom Disqualifiers: Exclude hard assets and general municipal noise
         self.disqualify_keywords = [
-            # Real Estate & Zoning
-            r"\bzoning\b", r"\bredevelopment\b", r"\breal property\b", r"\bland development\b", 
-            r"\bcomprehensive plan\b", r"\baffordable housing\b", r"\bvariance\b",
+            # Civil & Physical Utility Assets (Pipes, pumps, physical meters)
+            r"\bwater treatment plant\b", r"\bnanofiltration\b", r"\blift station\b",
+            r"\bpump station\b", r"\bwater main\b", r"\bsewer line\b", r"\bpipeline\b",
+            r"\bvalve replacement\b", r"\bchemical feed\b", r"\bfiltration system\b",
+            r"\bdirectional boring\b", r"\btrenching\b", r"\bconcrete\b", r"\basphalt\b",
+            r"\bgenerator\b", r"\bmeters?\s+(?:replacement|installation|supply)\b",
             
-            # Civil & Construction
-            r"\bconstruction\b", r"\broofing\b", r"\bpaving\b", r"\bdemolition\b", 
-            r"\bsidewalk\b", r"\bpark improvement\b", r"\bballfield\b", r"\brestoration\b",
-            r"\bwater treatment\b", r"\bnanofiltration\b", r"\bdirectional boring\b",
-            r"\btrenching\b", r"\bsolid waste\b",
+            # General Municipal Non-IT Noise
+            r"\bzoning\b", r"\bredevelopment\b", r"\breal property\b", r"\bucc sale\b",
+            r"\bauction\b", r"\bforeclosure\b", r"\bbcc meeting\b", r"\bboard meeting\b",
+            r"\bpublic hearing\b", r"\btax deed\b", r"\bfictitious name\b", r"\bsidewalk\b",
+            r"\bpark\b", r"\bballfield\b", r"\broofing\b", r"\bpaving\b"
+        ]
+        
+        # Millennium Core Competencies & Advisory Targets
+        self.target_tech_stack = [
+            # Core Domain Software
+            r"\bcis\b", r"\bcustomer information system\b", r"\butility billing\b",
+            r"\bmeter to cash\b", r"\bmdm\b", r"\bmeter data management\b",
+            r"\bami\b", r"\bamr\b", r"\beam\b", r"\benterprise asset management\b",
+            r"\berp\b", r"\bcrm\b",
             
-            # Legal & Administrative Noise
-            r"\bucc sale\b", r"\bauction\b", r"\bforeclosure\b", r"\bbcc meeting\b", 
-            r"\bboard meeting\b", r"\bpublic hearing\b", r"\bordinance\b", r"\blien\b",
-            r"\btax deed\b", r"\bfictitious name\b", r"\bnotice of intent\b",
-            r"\benvironmental protection\b", r"\bwater management\b", r"\bcharter school\b"
+            # Specific GovTech & Utility Platforms
+            r"\btyler\b", r"\bincode\b", r"\bmunis\b", r"\bcayenta\b",
+            r"\bcentralsquare\b", r"\bopengov\b", r"\boracle cc&b\b", r"\boracle c2m\b",
+            r"\bsap utilities\b", r"\bpower bi\b",
+            
+            # Professional Advisory & Consulting Services
+            r"\bbusiness process re-?engineering\b", r"\bbpr\b",
+            r"\bowner'?s representative\b", r"\bsoftware selection\b",
+            r"\brfp development\b", r"\bimplementation management\b",
+            r"\bstaff augmentation\b", r"\bqa oversight\b", r"\biv&v\b",
+            r"\bawwa\b", r"\bg480\b"
+        ]
+        
+        # Diversity & Set-Aside Opportunities
+        self.diversity_keywords = [
+            r"\bmbwe\b", r"\bmbe\b", r"\bcbe\b", r"\bdbe\b", r"\bsbe\b",
+            r"\bminority business\b", r"\bdisadvantaged business\b",
+            r"\bsubcontracting goal\b"
         ]
         
         self.piggyback_keywords = [
@@ -207,16 +233,6 @@ class DurmotIntelligence:
             r"\bmandatory pre-bid\b": 25,
             r"\bno substitutions\b": 30
         }
-        
-        self.target_tech_stack = [
-            r"\bsoftware implementation\b", r"\bsaas implementation\b",
-            r"\bsystem integration\b", r"\bsystems integration\b",
-            r"\bpower bi\b", r"\bserverless\b", r"\btyler technologies\b",
-            r"\bcjis\b", r"\bgoogle atom\b", r"\baws\b", r"\bdocker\b",
-            r"\bpostgresql\b", r"\bpython\b", r"\beam\b", r"\bgis\b",
-            r"\bsaas\b", r"\berp\b", r"\bcloud migration\b",
-            r"\betl\b", r"\bapi integration\b"
-        ]
 
     def scrape_deep_text(self, url):
         if not url: return ""
@@ -264,6 +280,7 @@ class DurmotIntelligence:
         deep_text = self.scrape_deep_text(rfp.get('url', ''))
         search_text = f"{rfp['title']} {rfp['agency']} {json.dumps(rfp['raw_metadata'])} {deep_text}".lower()
         
+        # Hard asset / general noise nuke
         for pattern in self.disqualify_keywords:
             if re.search(pattern, search_text):
                 return None  
@@ -272,6 +289,10 @@ class DurmotIntelligence:
         
         wired_score = 0
         wired_flags = []
+        
+        # Track Diversity / Set-Aside advantages
+        if any(re.search(kw, search_text) for kw in self.diversity_keywords):
+            wired_flags.append("MBWE/CBE Set-Aside")
         
         for pattern, points in self.wired_heuristics.items():
             if re.search(pattern, search_text):
@@ -338,7 +359,7 @@ class DurmotIntelligence:
             conn.commit()
             cursor.close()
             conn.close()
-            logging.info(f"Database insertion complete. Qualified: {inserted_count} RFPs | Disqualified non-IT: {dropped_count} notices.")
+            logging.info(f"Database insertion complete. Qualified: {inserted_count} RFPs | Disqualified Physical/Non-IT: {dropped_count} notices.")
             
         except Exception as e:
             logging.error(f"PostgreSQL Insertion Failed: {e}")
@@ -378,7 +399,7 @@ DASHBOARD_HTML = """
     </style>
 </head>
 <body>
-    <h1>Durmot Intelligence Engine - Enterprise IT & Implementations</h1>
+    <h1>Durmot Intelligence Engine - Utility IT & Advisory</h1>
     <a href="/run-scraper" class="btn">Trigger Scraping Pipeline</a>
     
     <table>
@@ -386,7 +407,7 @@ DASHBOARD_HTML = """
             <th>Agency</th>
             <th>RFP Title</th>
             <th>Wired Score</th>
-            <th>Risk Flags</th>
+            <th>Opportunity / Risk Flags</th>
             <th>Tech Stack Matches</th>
             <th>Link</th>
         </tr>
@@ -397,7 +418,7 @@ DASHBOARD_HTML = """
             <td class="score {% if row[3] > 30 %}score-high{% else %}score-low{% endif %}">{{ row[3] }}</td>
             <td>
                 {% for flag in row[4] %}
-                    <span class="badge">{{ flag }}</span>
+                    <span class="badge" {% if flag == 'MBWE/CBE Set-Aside' %}style="background-color: #8957e5;"{% endif %}>{{ flag }}</span>
                 {% endfor %}
             </td>
             <td>
