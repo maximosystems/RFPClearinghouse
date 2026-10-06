@@ -46,7 +46,6 @@ class RFPDataIngestion:
         logging.info("Intercepting DemandStar XHR Feed...")
         url = "https://api.demandstar.com/contents/content/v1/bids/search"
         
-        # Read token and explicitly strip ALL hidden newlines/line-breaks from Chrome copy-paste
         raw_token = os.environ.get("DEMANDSTAR_TOKEN", "")
         auth_token = re.sub(r'[\r\n]+', '', raw_token).strip()
         
@@ -63,12 +62,12 @@ class RFPDataIngestion:
                 headers["cookie"] = auth_token
             else:
                 headers["authorization"] = auth_token if auth_token.startswith("Bearer ") else f"Bearer {auth_token}"
-        else:
-            logging.warning("No DEMANDSTAR_TOKEN set in environment. Request may fail 401.")
 
-        # FIXED PAYLOAD: Removed commodity restrictions to open the raw firehose
+        # FIXED PAYLOAD: Added 'externalBids' back so it searches outside your empty subscription list
         payload = {
+            "showBids": "externalBids",
             "bidStatus": "AC",
+            "includeExternalBids": "true",
             "sortBy": "broadCastDate",
             "sortOrder": "DESC",
             "page": 1,
@@ -111,10 +110,10 @@ class RFPDataIngestion:
         
         for portal in florida_portals:
             url = f"https://api.procurement.opengov.com/api/v1/government/{portal}/project/public"
-            # FIXED PAYLOAD: Changed status filter to "open"
+            # FIXED PAYLOAD: Reverted to "all" to prevent 400 Bad Request API rejections
             payload = {
-                "filters": [{"type": "status", "value": "open"}],
-                "limit": 50,
+                "filters": [{"type": "status", "value": "all"}],
+                "limit": 100,
                 "page": 1,
                 "sortField": "proposalDeadline",
                 "sortDirection": "DESC"
@@ -134,8 +133,10 @@ class RFPDataIngestion:
                             "url": f"https://procurement.opengov.com/portal/{portal}/projects/{item.get('id')}" if item.get('id') else f"https://procurement.opengov.com/portal/{portal}"
                         })
                     logging.info(f"OpenGov extraction for {portal}: Found {len(projects)} records.")
+                else:
+                    logging.warning(f"OpenGov {portal} returned {response.status_code}")
             except Exception as e:
-                logging.debug(f"OpenGov portal {portal} query bypassed: {e}")
+                logging.warning(f"OpenGov portal {portal} query bypassed: {e}")
 
     def execute_pipeline(self):
         self.intercept_demandstar_xhr()
