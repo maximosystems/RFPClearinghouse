@@ -42,17 +42,14 @@ class RFPDataIngestion:
         }
         self.rfp_master_list = []
 
-    def scrape_florida_clearinghouse(self, keywords=None):
-        # DISABLED: Newspaper classified ads produce too much noise and lack direct PDF links.
-        pass
-
     def intercept_demandstar_xhr(self):
         logging.info("Intercepting DemandStar XHR Feed...")
         url = "https://api.demandstar.com/contents/content/v1/bids/search"
         
-        # NOTE: If DemandStar blocks this with a 401/403 error, you will need to log into 
-        # your new account, open Chrome Developer Tools (F12) -> Network, and copy your 
-        # "Authorization" bearer token into these headers.
+        # Read token and explicitly strip ALL hidden newlines/line-breaks from Chrome copy-paste
+        raw_token = os.environ.get("DEMANDSTAR_TOKEN", "")
+        auth_token = re.sub(r'[\r\n]+', '', raw_token).strip()
+        
         headers = {
             "accept": "application/json",
             "content-type": "application/json",
@@ -60,6 +57,15 @@ class RFPDataIngestion:
             "referer": "https://www.demandstar.com/",
             "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36"
         }
+        
+        if auth_token:
+            if not auth_token.lower().startswith("bearer ") and not auth_token.startswith("ey"):
+                headers["cookie"] = auth_token
+            else:
+                headers["authorization"] = auth_token if auth_token.startswith("Bearer ") else f"Bearer {auth_token}"
+        else:
+            logging.warning("No DEMANDSTAR_TOKEN set in environment. Request may fail 401.")
+
         payload = {
             "showBids": "externalBids",
             "bidStatus": "AC",
@@ -69,7 +75,7 @@ class RFPDataIngestion:
             "commodityExists": True
         }
         try:
-            response = requests.post(url, headers=headers, json=payload, timeout=10)
+            response = requests.post(url, headers=headers, json=payload, timeout=12)
             response.raise_for_status()
             data = response.json()
             bids = data.get('data', []) if isinstance(data, dict) else data
@@ -89,8 +95,13 @@ class RFPDataIngestion:
 
     def bypass_opengov_api(self):
         logging.info("Bypassing OpenGov Public APIs...")
-        # Add any other Florida OpenGov portal names here
-        florida_portals = ["orlando", "citrusfl"] 
+        # Expanded Florida municipal and county OpenGov portals
+        florida_portals = [
+            "orlando", "citrusfl", "colliercountyfl", "sarasotacountyfl",
+            "cityofgainesville", "tamarac", "cityofdelraybeach", "northportfl",
+            "cityofsanfordfl", "palmbachcountyfl"
+        ]
+        
         headers = {
             "accept": "*/*",
             "content-type": "application/json",
@@ -98,37 +109,36 @@ class RFPDataIngestion:
             "referer": "https://procurement.opengov.com/",
             "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36"
         }
+        
         for portal in florida_portals:
             url = f"https://api.procurement.opengov.com/api/v1/government/{portal}/project/public"
             payload = {
                 "filters": [{"type": "status", "value": "all"}],
                 "quickSearchQuery": None,
-                "limit": 100,
+                "limit": 50,
                 "page": 1,
                 "sortField": "proposalDeadline",
                 "sortDirection": "DESC"
             }
             try:
-                response = requests.post(url, headers=headers, json=payload, timeout=10)
-                response.raise_for_status()
-                data = response.json()
-                projects = data.get('data', []) if isinstance(data, dict) else data
-                
-                for item in projects:
-                    self.rfp_master_list.append({
-                        "source": f"OpenGov-{portal}",
-                        "title": item.get('title', item.get('name', 'Unknown Title')),
-                        "agency": portal,
-                        "published_date": item.get('publishedAt', item.get('releaseDate', '')),
-                        "raw_metadata": item,
-                        "url": f"https://procurement.opengov.com/portal/{portal}/projects/{item.get('id')}" if item.get('id') else f"https://procurement.opengov.com/portal/{portal}"
-                    })
-                logging.info(f"OpenGov extraction successful for {portal}. Found {len(projects)} bids.")
+                response = requests.post(url, headers=headers, json=payload, timeout=8)
+                if response.status_code == 200:
+                    data = response.json()
+                    projects = data.get('data', []) if isinstance(data, dict) else data
+                    for item in projects:
+                        self.rfp_master_list.append({
+                            "source": f"OpenGov-{portal}",
+                            "title": item.get('title', item.get('name', 'Unknown Title')),
+                            "agency": portal,
+                            "published_date": item.get('publishedAt', item.get('releaseDate', '')),
+                            "raw_metadata": item,
+                            "url": f"https://procurement.opengov.com/portal/{portal}/projects/{item.get('id')}" if item.get('id') else f"https://procurement.opengov.com/portal/{portal}"
+                        })
+                    logging.info(f"OpenGov extraction for {portal}: Found {len(projects)} records.")
             except Exception as e:
-                logging.error(f"Failed to fetch OpenGov portal {portal}: {e}")
+                logging.debug(f"OpenGov portal {portal} query bypassed: {e}")
 
     def execute_pipeline(self):
-        # self.scrape_florida_clearinghouse() # Disabled to focus on real platforms
         self.intercept_demandstar_xhr()
         self.bypass_opengov_api()
         logging.info(f"Pipeline complete. Ingested {len(self.rfp_master_list)} total raw records.")
@@ -138,7 +148,7 @@ class RFPDataIngestion:
 class DurmotIntelligence:
     def __init__(self):
         self.disqualify_keywords = [
-            # Hard Assets
+            # Hard Assets & Infrastructure
             r"\bwater treatment plant\b", r"\bnanofiltration\b", r"\blift station\b",
             r"\bpump station\b", r"\bwater main\b", r"\bsewer line\b", r"\bpipeline\b",
             r"\bvalve replacement\b", r"\bchemical feed\b", r"\bfiltration system\b",
@@ -169,12 +179,7 @@ class DurmotIntelligence:
         ]
         
         self.target_tech_stack = [
-            # Adjusted ERP Triggers
             r"\benterprise resource planning\b", 
-            r"\berp\s+(?:system|software|implementation|solution|cloud|migration|modernization)\b",
-            r"\b(?:cloud|finance|hr|payroll)\s+erp\b",
-            
-            # Standard Software Triggers
             r"\bcis\b", r"\bcustomer information system\b", r"\butility billing\b",
             r"\bmeter to cash\b", r"\bmdm\b", r"\bmeter data management\b",
             r"\bami\b", r"\bamr\b", r"\beam\b", r"\benterprise asset management\b",
@@ -211,7 +216,7 @@ class DurmotIntelligence:
         if not url: return ""
         try:
             headers = {'User-Agent': 'Mozilla/5.0'}
-            res = requests.get(url, headers=headers, timeout=10)
+            res = requests.get(url, headers=headers, timeout=8)
             if res.status_code == 200:
                 if url.lower().endswith('.pdf') or 'application/pdf' in res.headers.get('Content-Type', '').lower():
                     reader = PdfReader(io.BytesIO(res.content))
