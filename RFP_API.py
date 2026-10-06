@@ -175,13 +175,23 @@ class DurmotIntelligence:
     def __init__(self, db_url):
         self.db_url = db_url
         
+        # Aggressive filter to drop civil, legal, and environmental noise
         self.disqualify_keywords = [
-            r"\bzoning\b", r"\bredevelopment\b", r"\breal property\b", 
-            r"\bland development\b", r"\bucc sale\b", r"\bauction\b", 
-            r"\bforeclosure\b", r"\bbcc meeting\b", r"\bboard meeting\b",
-            r"\bpublic hearing\b", r"\bordinance\b", r"\bvariance\b",
-            r"\bcomprehensive plan\b", r"\baffordable housing\b", r"\blien\b",
-            r"\bconstruction\b", r"\broofing\b", r"\bpaving\b", r"\bdemolition\b"
+            # Real Estate & Zoning
+            r"\bzoning\b", r"\bredevelopment\b", r"\breal property\b", r"\bland development\b", 
+            r"\bcomprehensive plan\b", r"\baffordable housing\b", r"\bvariance\b",
+            
+            # Civil & Construction
+            r"\bconstruction\b", r"\broofing\b", r"\bpaving\b", r"\bdemolition\b", 
+            r"\bsidewalk\b", r"\bpark improvement\b", r"\bballfield\b", r"\brestoration\b",
+            r"\bwater treatment\b", r"\bnanofiltration\b", r"\bdirectional boring\b",
+            r"\btrenching\b", r"\bsolid waste\b",
+            
+            # Legal & Administrative Noise
+            r"\bucc sale\b", r"\bauction\b", r"\bforeclosure\b", r"\bbcc meeting\b", 
+            r"\bboard meeting\b", r"\bpublic hearing\b", r"\bordinance\b", r"\blien\b",
+            r"\btax deed\b", r"\bfictitious name\b", r"\bnotice of intent\b",
+            r"\benvironmental protection\b", r"\bwater management\b", r"\bcharter school\b"
         ]
         
         self.piggyback_keywords = [
