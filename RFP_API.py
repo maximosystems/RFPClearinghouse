@@ -59,17 +59,15 @@ class RFPDataIngestion:
             else:
                 headers["authorization"] = auth_token if auth_token.startswith("Bearer ") else f"Bearer {auth_token}"
 
-        search_terms = ["software", "erp", "system", "technology", "billing", "implementation"]
+        search_terms = ["software", "erp", "system", "technology", "billing", "implementation", "cloud"]
         
         for term in search_terms:
+            # FIXED: Payload stripped of commodity traps.
             payload = {
-                "showBids": "externalBids,Commodity",
-                "industry": "13452",
-                "bidStatus": "AC",
                 "bidName": term,
-                "commodityExists": False,
-                "commodityMatches": "true",
+                "showBids": "externalBids",
                 "includeExternalBids": "true",
+                "bidStatus": "AC",
                 "sortBy": "broadCastDate",
                 "sortOrder": "DESC",
                 "page": 1,
@@ -79,15 +77,18 @@ class RFPDataIngestion:
                 response = requests.post(url, headers=headers, json=payload, timeout=15)
                 if response.status_code == 200:
                     data = response.json()
-                    bids = data.get('data', []) if isinstance(data, dict) else data
+                    
+                    # FIXED: Using "result" instead of "data" based on the X-Ray
+                    bids = data.get('result', []) if isinstance(data, dict) else data
+                    
                     for item in bids:
                         self.rfp_master_list.append({
-                            "source": "Public-Notice-Network", # Anonymized internal source
+                            "source": "Public-Notice-Network", # Anonymized source
                             "title": item.get('bidName', 'Unknown Title'),
-                            "agency": item.get('agencyName', 'Unknown Agency'),
+                            "agency": item.get('agency', 'Unknown Agency'),
                             "published_date": item.get('broadCastDate', ''),
                             "raw_metadata": item,
-                            "url": f"https://www.demandstar.com/app/bids/{item.get('id', '')}"
+                            "url": f"https://www.demandstar.com/app/bids/{item.get('bidId', '')}"
                         })
                     logging.info(f"Node A [{term}]: Pulled {len(bids)} leads.")
             except Exception as e:
@@ -118,7 +119,7 @@ class RFPDataIngestion:
                     projects = data.get('data', []) if isinstance(data, dict) else data
                     for item in projects:
                         self.rfp_master_list.append({
-                            "source": "Onvia-Synced-Node", # Anonymized internal source
+                            "source": "Onvia-Synced-Node", # Anonymized source
                             "title": item.get('title', item.get('name', 'Unknown Title')),
                             "agency": portal.replace('cityof', 'City of ').title(),
                             "published_date": item.get('publishedAt', item.get('releaseDate', '')),
@@ -242,7 +243,7 @@ class DurmotIntelligence:
 
     def process_results(self, rfp_list):
         logging.info("Processing and filtering intelligence data in memory...")
-        unique_rfps = {item['title']: item for item in rfp_list}.values()
+        unique_rfps = {item['url']: item for item in rfp_list}.values()
         
         processed_bids = []
         dropped_count = 0
@@ -263,7 +264,7 @@ class DurmotIntelligence:
                 "friction_score": rfp['friction_score'],
                 "friction_flags": rfp['friction_flags'],
                 "tech_stack_hits": rfp['raw_metadata'].get('durmot_stack_matches', []),
-                "url": anonymized_url  # Replaced raw URL with the Google Search Mask
+                "url": anonymized_url  # URL masked!
             })
             
         processed_bids.sort(key=lambda x: x['friction_score'])
