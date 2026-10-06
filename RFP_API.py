@@ -66,13 +66,13 @@ class RFPDataIngestion:
         else:
             logging.warning("No DEMANDSTAR_TOKEN set in environment. Request may fail 401.")
 
+        # FIXED PAYLOAD: Removed commodity restrictions to open the raw firehose
         payload = {
-            "showBids": "externalBids",
             "bidStatus": "AC",
-            "includeExternalBids": "true",
             "sortBy": "broadCastDate",
             "sortOrder": "DESC",
-            "commodityExists": True
+            "page": 1,
+            "limit": 200
         }
         try:
             response = requests.post(url, headers=headers, json=payload, timeout=12)
@@ -95,7 +95,6 @@ class RFPDataIngestion:
 
     def bypass_opengov_api(self):
         logging.info("Bypassing OpenGov Public APIs...")
-        # Expanded Florida municipal and county OpenGov portals
         florida_portals = [
             "orlando", "citrusfl", "colliercountyfl", "sarasotacountyfl",
             "cityofgainesville", "tamarac", "cityofdelraybeach", "northportfl",
@@ -112,9 +111,9 @@ class RFPDataIngestion:
         
         for portal in florida_portals:
             url = f"https://api.procurement.opengov.com/api/v1/government/{portal}/project/public"
+            # FIXED PAYLOAD: Changed status filter to "open"
             payload = {
-                "filters": [{"type": "status", "value": "all"}],
-                "quickSearchQuery": None,
+                "filters": [{"type": "status", "value": "open"}],
                 "limit": 50,
                 "page": 1,
                 "sortField": "proposalDeadline",
