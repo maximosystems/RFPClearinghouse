@@ -44,7 +44,8 @@ class RFPDataIngestion:
 
     def scrape_florida_clearinghouse(self, keywords=None):
         if keywords is None:
-            keywords = ["utility billing", "customer information", "software implementation", "system integration", "ERP"]
+            # Replaced "ERP" with "enterprise resource planning" to avoid triggering water district searches
+            keywords = ["utility billing", "customer information", "software implementation", "system integration", "enterprise resource planning"]
             
         logging.info("Starting Florida Clearinghouse Scrape...")
         url = "https://floridapublicnotices.com/" 
@@ -191,22 +192,38 @@ class RFPDataIngestion:
 class DurmotIntelligence:
     def __init__(self):
         self.disqualify_keywords = [
+            # Hard Assets
             r"\bwater treatment plant\b", r"\bnanofiltration\b", r"\blift station\b",
             r"\bpump station\b", r"\bwater main\b", r"\bsewer line\b", r"\bpipeline\b",
             r"\bvalve replacement\b", r"\bchemical feed\b", r"\bfiltration system\b",
             r"\bdirectional boring\b", r"\btrenching\b", r"\bconcrete\b", r"\basphalt\b",
             r"\bgenerator\b", r"\bmeters?\s+(?:replacement|installation|supply)\b",
+            
+            # Real Estate & Municipal Noise
             r"\bzoning\b", r"\bredevelopment\b", r"\breal property\b", r"\bucc sale\b",
             r"\bauction\b", r"\bforeclosure\b", r"\bbcc meeting\b", r"\bboard meeting\b",
             r"\bpublic hearing\b", r"\btax deed\b", r"\bfictitious name\b", r"\bsidewalk\b",
-            r"\bpark\b", r"\bballfield\b", r"\broofing\b", r"\bpaving\b"
+            r"\bpark\b", r"\bballfield\b", r"\broofing\b", r"\bpaving\b", r"\bpetition to vacate\b",
+            r"\bdissolution of marriage\b", r"\btrim\s*-\s*budget\b", r"\btrim budget\b",
+            r"\bvalue adjustment board\b", r"\bcommunity development district\b",
+            
+            # Water Districts & State Agency Action Noise
+            r"\benvironmental resource permit\b", r"\bswfwmd\b", r"\bsjrwmd\b",
+            r"\bsfwmd\b", r"\bnwfwmd\b", r"\bsrwmd\b", r"\bwater management district\b",
+            r"\bnotice of final agency action\b", r"\bnotice of intended agency action\b"
         ]
         
         self.target_tech_stack = [
+            # Adjusted ERP Triggers
+            r"\benterprise resource planning\b", 
+            r"\berp\s+(?:system|software|implementation|solution|cloud|migration|modernization)\b",
+            r"\b(?:cloud|finance|hr|payroll)\s+erp\b",
+            
+            # Standard Software Triggers
             r"\bcis\b", r"\bcustomer information system\b", r"\butility billing\b",
             r"\bmeter to cash\b", r"\bmdm\b", r"\bmeter data management\b",
             r"\bami\b", r"\bamr\b", r"\beam\b", r"\benterprise asset management\b",
-            r"\berp\b", r"\bcrm\b", r"\btyler\b", r"\bincode\b", r"\bmunis\b", r"\bcayenta\b",
+            r"\bcrm\b", r"\btyler\b", r"\bincode\b", r"\bmunis\b", r"\bcayenta\b",
             r"\bcentralsquare\b", r"\bopengov\b", r"\boracle cc&b\b", r"\boracle c2m\b",
             r"\bsap utilities\b", r"\bpower bi\b", r"\bbusiness process re-?engineering\b", r"\bbpr\b",
             r"\bowner'?s representative\b", r"\bsoftware selection\b",
