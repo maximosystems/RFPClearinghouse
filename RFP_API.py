@@ -14,9 +14,25 @@ from flask import Flask, render_template_string, jsonify
 # Configure logging for Railway/Durmot monitoring
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-# --- IN-MEMORY STORAGE ---
-latest_scraped_bids = []
-scraper_status = "Awaiting initial scrape. Click 'Trigger Scraping Pipeline' to begin."
+# --- FILE-BASED CACHE (Shared across Gunicorn workers) ---
+CACHE_FILE = "durmot_cache.json"
+
+def get_state():
+    if not os.path.exists(CACHE_FILE):
+        return {"status": "Awaiting initial scrape. Click 'Trigger Scraping Pipeline' to begin.", "bids": []}
+    try:
+        with open(CACHE_FILE, 'r') as f:
+            return json.load(f)
+    except Exception:
+        return {"status": "Error reading cache.", "bids": []}
+
+def set_state(status, bids=None):
+    state = get_state()
+    state['status'] = status
+    if bids is not None:
+        state['bids'] = bids
+    with open(CACHE_FILE, 'w') as f:
+        json.dump(state, f)
 
 class RFPDataIngestion:
     def __init__(self):
@@ -167,7 +183,6 @@ class RFPDataIngestion:
 
     def execute_pipeline(self):
         self.scrape_florida_clearinghouse()
-        # self.intercept_demandstar_xhr() # Disabled until valid session cookie is provided
         self.bypass_opengov_api()
         logging.info(f"Pipeline complete. Ingested {len(self.rfp_master_list)} total raw records.")
         return json.dumps(self.rfp_master_list, indent=4)
@@ -302,7 +317,6 @@ class DurmotIntelligence:
         return rfp
 
     def process_results(self, rfp_list):
-        global latest_scraped_bids, scraper_status
         logging.info("Processing and filtering intelligence data in memory...")
         
         processed_bids = []
@@ -325,9 +339,9 @@ class DurmotIntelligence:
             
         processed_bids.sort(key=lambda x: x['wired_score'], reverse=True)
         
-        latest_scraped_bids = processed_bids
-        scraper_status = f"Last run successful. Qualified: {len(processed_bids)} RFPs | Disqualified Physical/Non-IT: {dropped_count} notices."
-        logging.info(scraper_status)
+        final_status = f"Last run successful. Qualified: {len(processed_bids)} RFPs | Disqualified Physical/Non-IT: {dropped_count} notices."
+        set_state(final_status, processed_bids)
+        logging.info(final_status)
 
 
 # --- FLASK DASHBOARD SERVER ---
@@ -444,19 +458,18 @@ DASHBOARD_HTML = """
 
 @app.route('/')
 def dashboard():
-    global latest_scraped_bids, scraper_status
-    return render_template_string(DASHBOARD_HTML, bids=latest_scraped_bids, status=scraper_status)
+    state = get_state()
+    return render_template_string(DASHBOARD_HTML, bids=state['bids'], status=state['status'])
 
 @app.route('/run-scraper')
 def trigger_scraper():
-    global scraper_status
-    if "Scraping in progress" in scraper_status:
+    state = get_state()
+    if "Scraping in progress" in state['status']:
         return jsonify({"status": "already running"})
         
-    scraper_status = "Scraping in progress... Downloading and analyzing state PDFs."
+    set_state("Scraping in progress... Downloading and analyzing state PDFs.")
     
     def run_pipeline():
-        global scraper_status
         try:
             pipeline = RFPDataIngestion()
             rfp_json_string = pipeline.execute_pipeline()
@@ -464,7 +477,7 @@ def trigger_scraper():
             intelligence_engine = DurmotIntelligence()
             intelligence_engine.process_results(master_rfp_list)
         except Exception as e:
-            scraper_status = f"Error during scraping: {e}"
+            set_state(f"Error during scraping: {e}")
             logging.error(f"Background scraping failed: {e}")
             
     thread = threading.Thread(target=run_pipeline)
@@ -473,8 +486,8 @@ def trigger_scraper():
 
 @app.route('/status')
 def get_status():
-    global scraper_status
-    return jsonify({"status": scraper_status})
+    state = get_state()
+    return jsonify({"status": state['status']})
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
