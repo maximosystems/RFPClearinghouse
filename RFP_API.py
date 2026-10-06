@@ -26,7 +26,6 @@ class RFPDataIngestion:
 
     def scrape_florida_clearinghouse(self, keywords=None):
         if keywords is None:
-            # Query targeted IT implementation terms instead of generic 'Information'
             keywords = ["software implementation", "system integration", "SaaS"]
             
         logging.info("Starting Florida Clearinghouse Scrape...")
@@ -69,7 +68,6 @@ class RFPDataIngestion:
                 for item in notices:
                     agency = item.get('city', item.get('paper', 'Florida Public Notice'))
                     
-                    # Clean and clamp lengthy public notice text to keep table layout tight
                     raw_title = item.get('notice', 'Unknown Title')
                     title = (raw_title[:120] + '...') if len(raw_title) > 120 else raw_title
                     
@@ -177,7 +175,6 @@ class DurmotIntelligence:
     def __init__(self, db_url):
         self.db_url = db_url
         
-        # Disqualification: Exclude land, civil, auction, meeting, and zoning notices
         self.disqualify_keywords = [
             r"\bzoning\b", r"\bredevelopment\b", r"\breal property\b", 
             r"\bland development\b", r"\bucc sale\b", r"\bauction\b", 
@@ -187,13 +184,11 @@ class DurmotIntelligence:
             r"\bconstruction\b", r"\broofing\b", r"\bpaving\b", r"\bdemolition\b"
         ]
         
-        # Cooperative purchasing heuristics
         self.piggyback_keywords = [
             r"\bpiggyback\b", r"\bcooperative purchasing\b", r"\bomnia\b", 
             r"\bsourcewell\b", r"\bnaspo\b", r"\bstate term contract\b", r"\bgsa\b"
         ]
         
-        # Rigged / wired heuristics
         self.wired_heuristics = {
             r"\bsole source\b": 40,
             r"\bproprietary\b": 30,
@@ -203,7 +198,6 @@ class DurmotIntelligence:
             r"\bno substitutions\b": 30
         }
         
-        # Dedicated IT Implementation Stack
         self.target_tech_stack = [
             r"\bsoftware implementation\b", r"\bsaas implementation\b",
             r"\bsystem integration\b", r"\bsystems integration\b",
@@ -255,3 +249,202 @@ class DurmotIntelligence:
             except Exception:
                 pass
         return 0, None
+
+    def score_and_flag(self, rfp):
+        deep_text = self.scrape_deep_text(rfp.get('url', ''))
+        search_text = f"{rfp['title']} {rfp['agency']} {json.dumps(rfp['raw_metadata'])} {deep_text}".lower()
+        
+        for pattern in self.disqualify_keywords:
+            if re.search(pattern, search_text):
+                return None  
+                
+        is_piggyback = any(re.search(kw, search_text) for kw in self.piggyback_keywords)
+        
+        wired_score = 0
+        wired_flags = []
+        
+        for pattern, points in self.wired_heuristics.items():
+            if re.search(pattern, search_text):
+                wired_score += points
+                wired_flags.append(pattern.replace(r"\b", "").strip().title())
+                
+        temporal_score, temporal_flag = self.evaluate_temporal_anomaly(rfp)
+        if temporal_flag:
+            wired_score += temporal_score
+            wired_flags.append(temporal_flag)
+                
+        stack_matches = []
+        for kw in self.target_tech_stack:
+            if re.search(kw, search_text):
+                stack_matches.append(kw.replace(r"\b", "").strip().upper())
+                
+        wired_score = min(wired_score, 100)
+        
+        rfp['is_piggyback'] = is_piggyback
+        rfp['wired_score'] = wired_score
+        rfp['wired_flags'] = wired_flags
+        rfp['raw_metadata']['durmot_stack_matches'] = list(set(stack_matches)) 
+        return rfp
+
+    def insert_to_postgres(self, rfp_list):
+        logging.info("Connecting to PostgreSQL to filter and insert intelligence data...")
+        try:
+            conn = psycopg2.connect(self.db_url)
+            cursor = conn.cursor()
+            
+            inserted_count = 0
+            dropped_count = 0
+            for raw_rfp in rfp_list:
+                rfp = self.score_and_flag(raw_rfp)
+                
+                if not rfp:
+                    dropped_count += 1
+                    continue
+                
+                insert_query = """
+                    INSERT INTO durmot_rfp_intelligence 
+                    (source, agency, title, published_date, url, is_piggyback, wired_score, wired_flags, raw_metadata)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (url) DO NOTHING;
+                """
+                
+                pub_date = rfp['published_date'] if rfp['published_date'] else None
+                
+                cursor.execute(insert_query, (
+                    rfp['source'],
+                    rfp['agency'],
+                    rfp['title'],
+                    pub_date,
+                    rfp['url'],
+                    rfp['is_piggyback'],
+                    rfp['wired_score'],
+                    rfp['wired_flags'],
+                    Json(rfp['raw_metadata'])
+                ))
+                
+                if cursor.rowcount > 0:
+                    inserted_count += 1
+                    
+            conn.commit()
+            cursor.close()
+            conn.close()
+            logging.info(f"Database insertion complete. Qualified: {inserted_count} RFPs | Disqualified non-IT: {dropped_count} notices.")
+            
+        except Exception as e:
+            logging.error(f"PostgreSQL Insertion Failed: {e}")
+
+
+# --- FLASK DASHBOARD SERVER ---
+app = Flask(__name__)
+DATABASE_URL = os.environ.get("DATABASE_URL", "postgresql://user:password@localhost:5432/durmot")
+
+DASHBOARD_HTML = """
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Durmot Intelligence Dashboard</title>
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background-color: #0d1117; color: #c9d1d9; margin: 0; padding: 20px; }
+        h1 { border-bottom: 1px solid #30363d; padding-bottom: 10px; }
+        table { width: 100%; border-collapse: collapse; margin-top: 20px; background-color: #161b22; border-radius: 6px; overflow: hidden; table-layout: fixed; }
+        th, td { padding: 12px 15px; text-align: left; border-bottom: 1px solid #30363d; word-wrap: break-word; }
+        th { background-color: #21262d; font-weight: bold; }
+        th:nth-child(1) { width: 15%; }
+        th:nth-child(2) { width: 35%; }
+        th:nth-child(3) { width: 10%; }
+        th:nth-child(4) { width: 15%; }
+        th:nth-child(5) { width: 15%; }
+        th:nth-child(6) { width: 10%; }
+        tr:hover { background-color: #30363d; }
+        a { color: #58a6ff; text-decoration: none; }
+        a:hover { text-decoration: underline; }
+        .score { font-weight: bold; }
+        .score-high { color: #f85149; }
+        .score-low { color: #3fb950; }
+        .badge { background-color: #b31d28; color: white; padding: 3px 8px; border-radius: 12px; font-size: 11px; margin-right: 4px; display: inline-block; margin-bottom: 3px; }
+        .badge-tech { background-color: #1f6feb; }
+        .btn { display: inline-block; background-color: #238636; color: white; padding: 10px 15px; text-decoration: none; border-radius: 6px; font-weight: bold; margin-bottom: 20px; }
+        .btn:hover { background-color: #2ea043; }
+    </style>
+</head>
+<body>
+    <h1>Durmot Intelligence Engine - Enterprise IT & Implementations</h1>
+    <a href="/run-scraper" class="btn">Trigger Scraping Pipeline</a>
+    
+    <table>
+        <tr>
+            <th>Agency</th>
+            <th>RFP Title</th>
+            <th>Wired Score</th>
+            <th>Risk Flags</th>
+            <th>Tech Stack Matches</th>
+            <th>Link</th>
+        </tr>
+        {% for row in bids %}
+        <tr>
+            <td>{{ row[0] }}</td>
+            <td>{{ row[1] }}</td>
+            <td class="score {% if row[3] > 30 %}score-high{% else %}score-low{% endif %}">{{ row[3] }}</td>
+            <td>
+                {% for flag in row[4] %}
+                    <span class="badge">{{ flag }}</span>
+                {% endfor %}
+            </td>
+            <td>
+                {% for tech in row[5] %}
+                    <span class="badge badge-tech">{{ tech }}</span>
+                {% endfor %}
+            </td>
+            <td><a href="{{ row[6] }}" target="_blank">View RFP</a></td>
+        </tr>
+        {% endfor %}
+    </table>
+</body>
+</html>
+"""
+
+@app.route('/')
+def dashboard():
+    try:
+        conn = psycopg2.connect(DATABASE_URL)
+        cursor = conn.cursor()
+        query = """
+            SELECT 
+                agency, 
+                title, 
+                is_piggyback,
+                wired_score,
+                COALESCE(wired_flags, '{}') AS wired_flags,
+                COALESCE(raw_metadata->'durmot_stack_matches', '[]') AS tech_stack_hits,
+                url
+            FROM durmot_rfp_intelligence 
+            ORDER BY wired_score DESC, ingested_at DESC
+            LIMIT 200;
+        """
+        cursor.execute(query)
+        bids = cursor.fetchall()
+        cursor.close()
+        conn.close()
+        return render_template_string(DASHBOARD_HTML, bids=bids)
+    except Exception as e:
+        return f"<h3 style='color:red;'>Database Error: {e}</h3>"
+
+@app.route('/run-scraper')
+def trigger_scraper():
+    def run_pipeline():
+        try:
+            pipeline = RFPDataIngestion()
+            rfp_json_string = pipeline.execute_pipeline()
+            master_rfp_list = json.loads(rfp_json_string)
+            intelligence_engine = DurmotIntelligence(DATABASE_URL)
+            intelligence_engine.insert_to_postgres(master_rfp_list)
+        except Exception as e:
+            logging.error(f"Background scraping failed: {e}")
+            
+    thread = threading.Thread(target=run_pipeline)
+    thread.start()
+    return "<h3>Pipeline triggered in the background! <a href='/'>Return to Dashboard</a></h3>"
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 8080))
+    app.run(host='0.0.0.0', port=port)
