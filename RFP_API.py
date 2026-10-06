@@ -43,72 +43,16 @@ class RFPDataIngestion:
         self.rfp_master_list = []
 
     def scrape_florida_clearinghouse(self, keywords=None):
-        if keywords is None:
-            # Replaced "ERP" with "enterprise resource planning" to avoid triggering water district searches
-            keywords = ["utility billing", "customer information", "software implementation", "system integration", "enterprise resource planning"]
-            
-        logging.info("Starting Florida Clearinghouse Scrape...")
-        url = "https://floridapublicnotices.com/" 
-        headers = {
-            "accept": "application/hal+json",
-            "content-type": "application/json",
-            "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36"
-        }
-
-        for kw in keywords:
-            payload = {
-                "counties": [],
-                "date-range--end-date": None,
-                "date-range--start-date": None,
-                "keywords": kw,
-                "offset": None,
-                "paper": "-1",
-                "sort-by": None,
-                "limit": 100 
-            }
-            try:
-                response = requests.post(url, headers=headers, json=payload, timeout=10)
-                response.raise_for_status()
-                data = response.json()
-                
-                notices = []
-                if isinstance(data, list):
-                    notices = data
-                elif isinstance(data, dict):
-                    for key in ['results', 'data', 'notices', 'items']:
-                        if key in data and isinstance(data[key], list):
-                            notices = data[key]
-                            break
-                    if not notices and '_embedded' in data and isinstance(data['_embedded'], dict):
-                        nested_lists = [v for v in data['_embedded'].values() if isinstance(v, list)]
-                        if nested_lists:
-                            notices = nested_lists[0]
-
-                for item in notices:
-                    agency = item.get('city', item.get('paper', 'Florida Public Notice'))
-                    
-                    raw_title = item.get('notice', 'Unknown Title')
-                    title = (raw_title[:120] + '...') if len(raw_title) > 120 else raw_title
-                    
-                    notice_date = item.get('date', '')
-                    pdf_link = item.get('_links', {}).get('media', {}).get('href', '')
-                    final_url = pdf_link if pdf_link else f"https://floridapublicnotices.com/notice/{item.get('id', '')}"
-                    
-                    self.rfp_master_list.append({
-                        "source": "FloridaPublicNotices",
-                        "title": title,
-                        "agency": agency,
-                        "published_date": notice_date,
-                        "raw_metadata": item,
-                        "url": final_url
-                    })
-                logging.info(f"Florida Clearinghouse extraction for '{kw}' complete. Found {len(notices)} notices.")
-            except Exception as e:
-                logging.error(f"Failed to scrape Florida Clearinghouse for '{kw}': {e}")
+        # DISABLED: Newspaper classified ads produce too much noise and lack direct PDF links.
+        pass
 
     def intercept_demandstar_xhr(self):
         logging.info("Intercepting DemandStar XHR Feed...")
         url = "https://api.demandstar.com/contents/content/v1/bids/search"
+        
+        # NOTE: If DemandStar blocks this with a 401/403 error, you will need to log into 
+        # your new account, open Chrome Developer Tools (F12) -> Network, and copy your 
+        # "Authorization" bearer token into these headers.
         headers = {
             "accept": "application/json",
             "content-type": "application/json",
@@ -145,6 +89,7 @@ class RFPDataIngestion:
 
     def bypass_opengov_api(self):
         logging.info("Bypassing OpenGov Public APIs...")
+        # Add any other Florida OpenGov portal names here
         florida_portals = ["orlando", "citrusfl"] 
         headers = {
             "accept": "*/*",
@@ -183,7 +128,8 @@ class RFPDataIngestion:
                 logging.error(f"Failed to fetch OpenGov portal {portal}: {e}")
 
     def execute_pipeline(self):
-        self.scrape_florida_clearinghouse()
+        # self.scrape_florida_clearinghouse() # Disabled to focus on real platforms
+        self.intercept_demandstar_xhr()
         self.bypass_opengov_api()
         logging.info(f"Pipeline complete. Ingested {len(self.rfp_master_list)} total raw records.")
         return json.dumps(self.rfp_master_list, indent=4)
@@ -198,6 +144,12 @@ class DurmotIntelligence:
             r"\bvalve replacement\b", r"\bchemical feed\b", r"\bfiltration system\b",
             r"\bdirectional boring\b", r"\btrenching\b", r"\bconcrete\b", r"\basphalt\b",
             r"\bgenerator\b", r"\bmeters?\s+(?:replacement|installation|supply)\b",
+            r"\bdrainage\b", r"\bwind mitigation\b", r"\bcabbage palm\b", r"\bremoval project\b",
+            
+            # Architecture, Engineering & Construction (AEC)
+            r"\bdesign-build\b", r"\barchitecture\b", r"\bengineering services\b", 
+            r"\bconstruction manager\b", r"\bgeneral contractor\b", r"\bgmp\b",
+            r"\bhvac\b", r"\blighting project\b", r"\btelecommunications\b", r"\bantennas?\b",
             
             # Real Estate & Municipal Noise
             r"\bzoning\b", r"\bredevelopment\b", r"\breal property\b", r"\bucc sale\b",
@@ -205,7 +157,10 @@ class DurmotIntelligence:
             r"\bpublic hearing\b", r"\btax deed\b", r"\bfictitious name\b", r"\bsidewalk\b",
             r"\bpark\b", r"\bballfield\b", r"\broofing\b", r"\bpaving\b", r"\bpetition to vacate\b",
             r"\bdissolution of marriage\b", r"\btrim\s*-\s*budget\b", r"\btrim budget\b",
-            r"\bvalue adjustment board\b", r"\bcommunity development district\b",
+            r"\bbudget summary\b", r"\bvalue adjustment board\b", r"\bbanking services\b",
+            r"\bcommunity development district\b", r"\bsports complex\b", r"\bstadium\b",
+            r"\bsummons by publication\b", r"\bprobate\b", r"\bestate of\b", 
+            r"\btermination of parental rights\b", r"\blost property\b",
             
             # Water Districts & State Agency Action Noise
             r"\benvironmental resource permit\b", r"\bswfwmd\b", r"\bsjrwmd\b",
@@ -424,7 +379,6 @@ DASHBOARD_HTML = """
                 });
         }
 
-        // Auto-reconnect the poller if the user refreshes the page mid-scrape
         window.onload = function() {
             const currentStatus = document.getElementById('status-text').innerText;
             if (currentStatus.includes("Scraping in progress")) {
@@ -484,7 +438,7 @@ def trigger_scraper():
     if "Scraping in progress" in state['status']:
         return jsonify({"status": "already running"})
         
-    set_state("Scraping in progress... Downloading and analyzing state PDFs.")
+    set_state("Scraping in progress... Fetching OpenGov and DemandStar feeds.")
     
     def run_pipeline():
         try:
