@@ -9,7 +9,7 @@ from datetime import datetime
 from dateutil import parser
 from bs4 import BeautifulSoup
 from pypdf import PdfReader
-from flask import Flask, render_template_string
+from flask import Flask, render_template_string, jsonify
 
 # Configure logging for Railway/Durmot monitoring
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -323,7 +323,6 @@ class DurmotIntelligence:
                 "url": rfp['url']
             })
             
-        # Sort by wired score descending
         processed_bids.sort(key=lambda x: x['wired_score'], reverse=True)
         
         latest_scraped_bids = processed_bids
@@ -359,16 +358,46 @@ DASHBOARD_HTML = """
         .score-low { color: #3fb950; }
         .badge { background-color: #b31d28; color: white; padding: 3px 8px; border-radius: 12px; font-size: 11px; margin-right: 4px; display: inline-block; margin-bottom: 3px; }
         .badge-tech { background-color: #1f6feb; }
-        .btn { display: inline-block; background-color: #238636; color: white; padding: 10px 15px; text-decoration: none; border-radius: 6px; font-weight: bold; margin-bottom: 5px; margin-right: 10px; }
+        .btn { display: inline-block; background-color: #238636; color: white; padding: 10px 15px; text-decoration: none; border-radius: 6px; font-weight: bold; margin-bottom: 5px; cursor: pointer; border: none; font-size: 14px;}
         .btn:hover { background-color: #2ea043; }
         .status-box { background-color: #21262d; padding: 10px; border-radius: 6px; border-left: 4px solid #58a6ff; margin-bottom: 20px; font-size: 14px; }
     </style>
+    <script>
+        function triggerScrape() {
+            const btn = document.getElementById('scrape-btn');
+            const statusText = document.getElementById('status-text');
+            
+            btn.innerText = "Scraping in progress... Please wait.";
+            btn.style.pointerEvents = "none";
+            btn.style.opacity = "0.6";
+            
+            // Trigger the backend process
+            fetch('/run-scraper')
+                .then(response => response.json())
+                .then(data => {
+                    // Poll for status updates every 5 seconds
+                    const pollInterval = setInterval(() => {
+                        fetch('/status')
+                            .then(res => res.json())
+                            .then(data => {
+                                statusText.innerHTML = "<strong>Status:</strong> " + data.status;
+                                // If status no longer says 'Scraping in progress', it's done
+                                if (!data.status.includes("Scraping in progress")) {
+                                    clearInterval(pollInterval);
+                                    btn.innerText = "Refresh Complete! Reloading Data...";
+                                    window.location.reload();
+                                }
+                            });
+                    }, 5000);
+                });
+        }
+    </script>
 </head>
 <body>
     <h1>Durmot Intelligence Engine - Utility IT & Advisory</h1>
-    <a href="/run-scraper" class="btn">Trigger Scraping Pipeline (Live Search)</a>
+    <button id="scrape-btn" class="btn" onclick="triggerScrape()">Trigger Scraping Pipeline (Live Search)</button>
     
-    <div class="status-box">
+    <div class="status-box" id="status-text">
         <strong>Status:</strong> {{ status }}
     </div>
     
@@ -412,7 +441,10 @@ def dashboard():
 @app.route('/run-scraper')
 def trigger_scraper():
     global scraper_status
-    scraper_status = "Scraping in progress... Please wait 2-3 minutes and refresh the page."
+    if "Scraping in progress" in scraper_status:
+        return jsonify({"status": "already running"})
+        
+    scraper_status = "Scraping in progress... Downloading and analyzing state PDFs."
     
     def run_pipeline():
         global scraper_status
@@ -428,7 +460,12 @@ def trigger_scraper():
             
     thread = threading.Thread(target=run_pipeline)
     thread.start()
-    return "<h3>Live Pipeline triggered! <a href='/'>Return to Dashboard</a> and refresh in a few minutes.</h3>"
+    return jsonify({"status": "started"})
+
+@app.route('/status')
+def get_status():
+    global scraper_status
+    return jsonify({"status": scraper_status})
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
