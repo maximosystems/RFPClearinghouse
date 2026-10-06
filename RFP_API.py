@@ -43,7 +43,7 @@ class RFPDataIngestion:
         self.rfp_master_list = []
 
     def intercept_demandstar_xhr(self):
-        logging.info("Intercepting DemandStar XHR Feed (Dumb Pipe Mode)...")
+        logging.info("Intercepting DemandStar XHR Feed (Unrestricted Firehose)...")
         url = "https://api.demandstar.com/contents/content/v1/bids/search"
         
         raw_token = os.environ.get("DEMANDSTAR_TOKEN", "")
@@ -63,8 +63,10 @@ class RFPDataIngestion:
             else:
                 headers["authorization"] = auth_token if auth_token.startswith("Bearer ") else f"Bearer {auth_token}"
 
-        # FIXED PAYLOAD: No keywords, no external filters. Just the 300 newest active bids.
+        # FIXED PAYLOAD: Restored externalBids to bypass the empty subscription list
         payload = {
+            "showBids": "externalBids",
+            "includeExternalBids": "true",
             "bidStatus": "AC",
             "sortBy": "broadCastDate",
             "sortOrder": "DESC",
@@ -87,17 +89,18 @@ class RFPDataIngestion:
                         "raw_metadata": item,
                         "url": f"https://www.demandstar.com/app/bids/{item.get('id', '')}"
                     })
-                logging.info(f"DemandStar extraction successful. Pulled {len(bids)} raw bids for local filtering.")
+                logging.info(f"DemandStar extraction successful. Pulled {len(bids)} raw nationwide bids.")
             else:
                 logging.warning(f"DemandStar returned status code {response.status_code}")
         except Exception as e:
             logging.error(f"Failed to query DemandStar: {e}")
 
     def bypass_opengov_api(self):
-        logging.info("Bypassing OpenGov Public APIs (Dumb Pipe Mode)...")
+        logging.info("Bypassing OpenGov Public APIs...")
+        # Replaced dead 404 portals with known active Florida portals
         florida_portals = [
             "orlando", "citrusfl", "cityofgainesville", 
-            "fortlauderdale", "daytonabeach"
+            "marionfl", "alachuacounty"
         ]
         
         headers = {
@@ -110,10 +113,13 @@ class RFPDataIngestion:
         
         for portal in florida_portals:
             url = f"https://api.procurement.opengov.com/api/v1/government/{portal}/project/public"
-            # FIXED PAYLOAD: Absolute bare minimum pagination to prevent API logic rejections
+            # FIXED PAYLOAD: Restored sort parameters so OpenGov stops returning empty arrays
             payload = {
+                "filters": [{"type": "status", "value": "active"}],
                 "limit": 100,
-                "page": 1
+                "page": 1,
+                "sortField": "proposalDeadline",
+                "sortDirection": "DESC"
             }
             try:
                 response = requests.post(url, headers=headers, json=payload, timeout=10)
@@ -129,7 +135,7 @@ class RFPDataIngestion:
                             "raw_metadata": item,
                             "url": f"https://procurement.opengov.com/portal/{portal}/projects/{item.get('id')}" if item.get('id') else f"https://procurement.opengov.com/portal/{portal}"
                         })
-                    logging.info(f"OpenGov extraction for {portal}: Pulled {len(projects)} raw records.")
+                    logging.info(f"OpenGov extraction for {portal}: Pulled {len(projects)} records.")
                 else:
                     logging.warning(f"OpenGov {portal} returned {response.status_code}")
             except Exception as e:
@@ -195,7 +201,6 @@ class DurmotIntelligence:
             r"\bsubcontracting goal\b"
         ]
         
-        # We look for these to measure market resistance
         self.friction_heuristics = {
             r"\bsole source\b": 40,
             r"\bproprietary\b": 30,
@@ -248,8 +253,6 @@ class DurmotIntelligence:
         return 0, None
 
     def score_and_flag(self, rfp):
-        # We are pulling broad records, so we MUST check if it matches our tech stack FIRST
-        # to avoid downloading 300 construction PDFs.
         base_search_text = f"{rfp['title']} {rfp['agency']} {json.dumps(rfp['raw_metadata'])}".lower()
         
         stack_matches = []
@@ -257,14 +260,10 @@ class DurmotIntelligence:
             if re.search(kw, base_search_text):
                 stack_matches.append(kw.replace(r"\b", "").strip().upper())
                 
-        # If the title/metadata has NO relation to IT software, drop it immediately
-        # (Saves the server from crashing by trying to read 300 PDFs)
         if not stack_matches:
-            # Fallback: Check if common IT words are in the title at least
             if not re.search(r'\b(software|system|erp|technology|billing|platform|cloud)\b', base_search_text):
                 return None
 
-        # If it passed the initial IT check, NOW we download the PDF to deep-scan it
         deep_text = self.scrape_deep_text(rfp.get('url', ''))
         search_text = f"{base_search_text} {deep_text}"
         
@@ -288,7 +287,6 @@ class DurmotIntelligence:
             friction_score += temporal_score
             friction_flags.append(temporal_flag)
                 
-        # Do one final deep-text check for tech stack in case the PDF had it but the title didn't
         for kw in self.target_tech_stack:
             if re.search(kw, search_text) and kw.replace(r"\b", "").strip().upper() not in stack_matches:
                 stack_matches.append(kw.replace(r"\b", "").strip().upper())
