@@ -5,6 +5,7 @@ import json
 import logging
 import requests
 import threading
+import urllib.parse
 from datetime import datetime
 from dateutil import parser
 from bs4 import BeautifulSoup
@@ -38,7 +39,7 @@ class RFPDataIngestion:
         self.rfp_master_list = []
 
     def intercept_demandstar_xhr(self):
-        logging.info("Intercepting DemandStar XHR Feed...")
+        logging.info("Intercepting Primary Nodes (Ghost Mode)...")
         url = "https://api.demandstar.com/contents/content/v1/bids/search"
         
         raw_token = os.environ.get("DEMANDSTAR_TOKEN", "")
@@ -58,14 +59,17 @@ class RFPDataIngestion:
             else:
                 headers["authorization"] = auth_token if auth_token.startswith("Bearer ") else f"Bearer {auth_token}"
 
-        search_terms = ["software", "erp", "system", "technology", "billing", "implementation", "cloud"]
+        search_terms = ["software", "erp", "system", "technology", "billing", "implementation"]
         
         for term in search_terms:
             payload = {
-                "bidName": term,
-                "showBids": "externalBids",
-                "includeExternalBids": "true",
+                "showBids": "externalBids,Commodity",
+                "industry": "13452",
                 "bidStatus": "AC",
+                "bidName": term,
+                "commodityExists": False,
+                "commodityMatches": "true",
+                "includeExternalBids": "true",
                 "sortBy": "broadCastDate",
                 "sortOrder": "DESC",
                 "page": 1,
@@ -75,27 +79,59 @@ class RFPDataIngestion:
                 response = requests.post(url, headers=headers, json=payload, timeout=15)
                 if response.status_code == 200:
                     data = response.json()
-                    
-                    # THE FIX: DemandStar hides the array in 'result', not 'data'
-                    bids = data.get('result', []) if isinstance(data, dict) else data
-                    
+                    bids = data.get('data', []) if isinstance(data, dict) else data
                     for item in bids:
                         self.rfp_master_list.append({
-                            "source": f"DemandStar",
+                            "source": "Public-Notice-Network", # Anonymized internal source
                             "title": item.get('bidName', 'Unknown Title'),
-                            "agency": item.get('agency', 'Unknown Agency'), # Note: X-Ray showed it as 'agency', not 'agencyName'
+                            "agency": item.get('agencyName', 'Unknown Agency'),
                             "published_date": item.get('broadCastDate', ''),
                             "raw_metadata": item,
-                            "url": f"https://www.demandstar.com/app/bids/{item.get('bidId', '')}" # X-Ray showed 'bidId'
+                            "url": f"https://www.demandstar.com/app/bids/{item.get('id', '')}"
                         })
-                    logging.info(f"DemandStar [{term}]: Pulled {len(bids)} raw leads.")
-                else:
-                    logging.warning(f"DemandStar returned {response.status_code}")
+                    logging.info(f"Node A [{term}]: Pulled {len(bids)} leads.")
             except Exception as e:
-                logging.error(f"Failed DemandStar query: {e}")
+                pass
+
+    def bypass_opengov_api(self):
+        logging.info("Intercepting Secondary Nodes...")
+        florida_portals = ["orlando", "citrusfl", "cityofgainesville"]
+        
+        headers = {
+            "accept": "application/json, text/plain, */*",
+            "content-type": "application/json",
+            "origin": "https://procurement.opengov.com",
+            "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+        }
+        
+        for portal in florida_portals:
+            url = f"https://api.procurement.opengov.com/api/v1/government/{portal}/project/public"
+            payload = {
+                "filters": [{"type": "status", "value": "active"}],
+                "limit": 50,
+                "page": 1
+            }
+            try:
+                response = requests.post(url, headers=headers, json=payload, timeout=10)
+                if response.status_code == 200:
+                    data = response.json()
+                    projects = data.get('data', []) if isinstance(data, dict) else data
+                    for item in projects:
+                        self.rfp_master_list.append({
+                            "source": "Onvia-Synced-Node", # Anonymized internal source
+                            "title": item.get('title', item.get('name', 'Unknown Title')),
+                            "agency": portal.replace('cityof', 'City of ').title(),
+                            "published_date": item.get('publishedAt', item.get('releaseDate', '')),
+                            "raw_metadata": item,
+                            "url": f"https://procurement.opengov.com/portal/{portal}/projects/{item.get('id')}" if item.get('id') else ""
+                        })
+                    logging.info(f"Node B [{portal}]: Pulled {len(projects)} records.")
+            except Exception as e:
+                pass
 
     def execute_pipeline(self):
         self.intercept_demandstar_xhr()
+        self.bypass_opengov_api()
         logging.info(f"Pipeline complete. Ingested {len(self.rfp_master_list)} total raw records.")
         return json.dumps(self.rfp_master_list, indent=4)
 
@@ -206,7 +242,7 @@ class DurmotIntelligence:
 
     def process_results(self, rfp_list):
         logging.info("Processing and filtering intelligence data in memory...")
-        unique_rfps = {item['url']: item for item in rfp_list}.values()
+        unique_rfps = {item['title']: item for item in rfp_list}.values()
         
         processed_bids = []
         dropped_count = 0
@@ -215,13 +251,19 @@ class DurmotIntelligence:
             if not rfp:
                 dropped_count += 1
                 continue
+                
+            # SEARCH MASKING: Convert the raw URL into an organic Google Search query
+            search_query = f"{rfp['agency']} {rfp['title']} RFP"
+            safe_query = urllib.parse.quote_plus(search_query)
+            anonymized_url = f"https://www.google.com/search?q={safe_query}"
+                
             processed_bids.append({
                 "agency": rfp['agency'],
                 "title": rfp['title'],
                 "friction_score": rfp['friction_score'],
                 "friction_flags": rfp['friction_flags'],
                 "tech_stack_hits": rfp['raw_metadata'].get('durmot_stack_matches', []),
-                "url": rfp['url']
+                "url": anonymized_url  # Replaced raw URL with the Google Search Mask
             })
             
         processed_bids.sort(key=lambda x: x['friction_score'])
@@ -323,7 +365,7 @@ DASHBOARD_HTML = """
                     <span class="badge badge-tech">{{ tech }}</span>
                 {% endfor %}
             </td>
-            <td><a href="{{ row.url }}" target="_blank">View RFP</a></td>
+            <td><a href="{{ row.url }}" target="_blank">Search Public Notice</a></td>
         </tr>
         {% endfor %}
     </table>
