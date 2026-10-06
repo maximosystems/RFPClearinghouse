@@ -5,8 +5,6 @@ import json
 import logging
 import requests
 import threading
-import psycopg2
-from psycopg2.extras import Json
 from datetime import datetime
 from dateutil import parser
 from bs4 import BeautifulSoup
@@ -15,6 +13,10 @@ from flask import Flask, render_template_string
 
 # Configure logging for Railway/Durmot monitoring
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+# --- IN-MEMORY STORAGE ---
+latest_scraped_bids = []
+scraper_status = "Awaiting initial scrape. Click 'Trigger Scraping Pipeline' to begin."
 
 class RFPDataIngestion:
     def __init__(self):
@@ -26,7 +28,6 @@ class RFPDataIngestion:
 
     def scrape_florida_clearinghouse(self, keywords=None):
         if keywords is None:
-            # Tuned specifically for utility software and advisory
             keywords = ["utility billing", "customer information", "software implementation", "system integration", "ERP"]
             
         logging.info("Starting Florida Clearinghouse Scrape...")
@@ -173,47 +174,32 @@ class RFPDataIngestion:
 
 
 class DurmotIntelligence:
-    def __init__(self, db_url):
-        self.db_url = db_url
-        
-        # Millennium Custom Disqualifiers: Exclude hard assets and general municipal noise
+    def __init__(self):
         self.disqualify_keywords = [
-            # Civil & Physical Utility Assets (Pipes, pumps, physical meters)
             r"\bwater treatment plant\b", r"\bnanofiltration\b", r"\blift station\b",
             r"\bpump station\b", r"\bwater main\b", r"\bsewer line\b", r"\bpipeline\b",
             r"\bvalve replacement\b", r"\bchemical feed\b", r"\bfiltration system\b",
             r"\bdirectional boring\b", r"\btrenching\b", r"\bconcrete\b", r"\basphalt\b",
             r"\bgenerator\b", r"\bmeters?\s+(?:replacement|installation|supply)\b",
-            
-            # General Municipal Non-IT Noise
             r"\bzoning\b", r"\bredevelopment\b", r"\breal property\b", r"\bucc sale\b",
             r"\bauction\b", r"\bforeclosure\b", r"\bbcc meeting\b", r"\bboard meeting\b",
             r"\bpublic hearing\b", r"\btax deed\b", r"\bfictitious name\b", r"\bsidewalk\b",
             r"\bpark\b", r"\bballfield\b", r"\broofing\b", r"\bpaving\b"
         ]
         
-        # Millennium Core Competencies & Advisory Targets
         self.target_tech_stack = [
-            # Core Domain Software
             r"\bcis\b", r"\bcustomer information system\b", r"\butility billing\b",
             r"\bmeter to cash\b", r"\bmdm\b", r"\bmeter data management\b",
             r"\bami\b", r"\bamr\b", r"\beam\b", r"\benterprise asset management\b",
-            r"\berp\b", r"\bcrm\b",
-            
-            # Specific GovTech & Utility Platforms
-            r"\btyler\b", r"\bincode\b", r"\bmunis\b", r"\bcayenta\b",
+            r"\berp\b", r"\bcrm\b", r"\btyler\b", r"\bincode\b", r"\bmunis\b", r"\bcayenta\b",
             r"\bcentralsquare\b", r"\bopengov\b", r"\boracle cc&b\b", r"\boracle c2m\b",
-            r"\bsap utilities\b", r"\bpower bi\b",
-            
-            # Professional Advisory & Consulting Services
-            r"\bbusiness process re-?engineering\b", r"\bbpr\b",
+            r"\bsap utilities\b", r"\bpower bi\b", r"\bbusiness process re-?engineering\b", r"\bbpr\b",
             r"\bowner'?s representative\b", r"\bsoftware selection\b",
             r"\brfp development\b", r"\bimplementation management\b",
             r"\bstaff augmentation\b", r"\bqa oversight\b", r"\biv&v\b",
             r"\bawwa\b", r"\bg480\b"
         ]
         
-        # Diversity & Set-Aside Opportunities
         self.diversity_keywords = [
             r"\bmbwe\b", r"\bmbe\b", r"\bcbe\b", r"\bdbe\b", r"\bsbe\b",
             r"\bminority business\b", r"\bdisadvantaged business\b",
@@ -280,7 +266,6 @@ class DurmotIntelligence:
         deep_text = self.scrape_deep_text(rfp.get('url', ''))
         search_text = f"{rfp['title']} {rfp['agency']} {json.dumps(rfp['raw_metadata'])} {deep_text}".lower()
         
-        # Hard asset / general noise nuke
         for pattern in self.disqualify_keywords:
             if re.search(pattern, search_text):
                 return None  
@@ -290,7 +275,6 @@ class DurmotIntelligence:
         wired_score = 0
         wired_flags = []
         
-        # Track Diversity / Set-Aside advantages
         if any(re.search(kw, search_text) for kw in self.diversity_keywords):
             wired_flags.append("MBWE/CBE Set-Aside")
         
@@ -317,57 +301,38 @@ class DurmotIntelligence:
         rfp['raw_metadata']['durmot_stack_matches'] = list(set(stack_matches)) 
         return rfp
 
-    def insert_to_postgres(self, rfp_list):
-        logging.info("Connecting to PostgreSQL to filter and insert intelligence data...")
-        try:
-            conn = psycopg2.connect(self.db_url)
-            cursor = conn.cursor()
+    def process_results(self, rfp_list):
+        global latest_scraped_bids, scraper_status
+        logging.info("Processing and filtering intelligence data in memory...")
+        
+        processed_bids = []
+        dropped_count = 0
+        for raw_rfp in rfp_list:
+            rfp = self.score_and_flag(raw_rfp)
             
-            inserted_count = 0
-            dropped_count = 0
-            for raw_rfp in rfp_list:
-                rfp = self.score_and_flag(raw_rfp)
+            if not rfp:
+                dropped_count += 1
+                continue
                 
-                if not rfp:
-                    dropped_count += 1
-                    continue
-                
-                insert_query = """
-                    INSERT INTO durmot_rfp_intelligence 
-                    (source, agency, title, published_date, url, is_piggyback, wired_score, wired_flags, raw_metadata)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-                    ON CONFLICT (url) DO NOTHING;
-                """
-                
-                pub_date = rfp['published_date'] if rfp['published_date'] else None
-                
-                cursor.execute(insert_query, (
-                    rfp['source'],
-                    rfp['agency'],
-                    rfp['title'],
-                    pub_date,
-                    rfp['url'],
-                    rfp['is_piggyback'],
-                    rfp['wired_score'],
-                    rfp['wired_flags'],
-                    Json(rfp['raw_metadata'])
-                ))
-                
-                if cursor.rowcount > 0:
-                    inserted_count += 1
-                    
-            conn.commit()
-            cursor.close()
-            conn.close()
-            logging.info(f"Database insertion complete. Qualified: {inserted_count} RFPs | Disqualified Physical/Non-IT: {dropped_count} notices.")
+            processed_bids.append({
+                "agency": rfp['agency'],
+                "title": rfp['title'],
+                "wired_score": rfp['wired_score'],
+                "wired_flags": rfp['wired_flags'],
+                "tech_stack_hits": rfp['raw_metadata'].get('durmot_stack_matches', []),
+                "url": rfp['url']
+            })
             
-        except Exception as e:
-            logging.error(f"PostgreSQL Insertion Failed: {e}")
+        # Sort by wired score descending
+        processed_bids.sort(key=lambda x: x['wired_score'], reverse=True)
+        
+        latest_scraped_bids = processed_bids
+        scraper_status = f"Last run successful. Qualified: {len(processed_bids)} RFPs | Disqualified Physical/Non-IT: {dropped_count} notices."
+        logging.info(scraper_status)
 
 
 # --- FLASK DASHBOARD SERVER ---
 app = Flask(__name__)
-DATABASE_URL = os.environ.get("DATABASE_URL", "postgresql://user:password@localhost:5432/durmot")
 
 DASHBOARD_HTML = """
 <!DOCTYPE html>
@@ -394,13 +359,18 @@ DASHBOARD_HTML = """
         .score-low { color: #3fb950; }
         .badge { background-color: #b31d28; color: white; padding: 3px 8px; border-radius: 12px; font-size: 11px; margin-right: 4px; display: inline-block; margin-bottom: 3px; }
         .badge-tech { background-color: #1f6feb; }
-        .btn { display: inline-block; background-color: #238636; color: white; padding: 10px 15px; text-decoration: none; border-radius: 6px; font-weight: bold; margin-bottom: 20px; }
+        .btn { display: inline-block; background-color: #238636; color: white; padding: 10px 15px; text-decoration: none; border-radius: 6px; font-weight: bold; margin-bottom: 5px; margin-right: 10px; }
         .btn:hover { background-color: #2ea043; }
+        .status-box { background-color: #21262d; padding: 10px; border-radius: 6px; border-left: 4px solid #58a6ff; margin-bottom: 20px; font-size: 14px; }
     </style>
 </head>
 <body>
     <h1>Durmot Intelligence Engine - Utility IT & Advisory</h1>
-    <a href="/run-scraper" class="btn">Trigger Scraping Pipeline</a>
+    <a href="/run-scraper" class="btn">Trigger Scraping Pipeline (Live Search)</a>
+    
+    <div class="status-box">
+        <strong>Status:</strong> {{ status }}
+    </div>
     
     <table>
         <tr>
@@ -413,20 +383,20 @@ DASHBOARD_HTML = """
         </tr>
         {% for row in bids %}
         <tr>
-            <td>{{ row[0] }}</td>
-            <td>{{ row[1] }}</td>
-            <td class="score {% if row[3] > 30 %}score-high{% else %}score-low{% endif %}">{{ row[3] }}</td>
+            <td>{{ row.agency }}</td>
+            <td>{{ row.title }}</td>
+            <td class="score {% if row.wired_score > 30 %}score-high{% else %}score-low{% endif %}">{{ row.wired_score }}</td>
             <td>
-                {% for flag in row[4] %}
+                {% for flag in row.wired_flags %}
                     <span class="badge" {% if flag == 'MBWE/CBE Set-Aside' %}style="background-color: #8957e5;"{% endif %}>{{ flag }}</span>
                 {% endfor %}
             </td>
             <td>
-                {% for tech in row[5] %}
+                {% for tech in row.tech_stack_hits %}
                     <span class="badge badge-tech">{{ tech }}</span>
                 {% endfor %}
             </td>
-            <td><a href="{{ row[6] }}" target="_blank">View RFP</a></td>
+            <td><a href="{{ row.url }}" target="_blank">View RFP</a></td>
         </tr>
         {% endfor %}
     </table>
@@ -436,45 +406,29 @@ DASHBOARD_HTML = """
 
 @app.route('/')
 def dashboard():
-    try:
-        conn = psycopg2.connect(DATABASE_URL)
-        cursor = conn.cursor()
-        query = """
-            SELECT 
-                agency, 
-                title, 
-                is_piggyback,
-                wired_score,
-                COALESCE(wired_flags, '{}') AS wired_flags,
-                COALESCE(raw_metadata->'durmot_stack_matches', '[]') AS tech_stack_hits,
-                url
-            FROM durmot_rfp_intelligence 
-            ORDER BY wired_score DESC, ingested_at DESC
-            LIMIT 200;
-        """
-        cursor.execute(query)
-        bids = cursor.fetchall()
-        cursor.close()
-        conn.close()
-        return render_template_string(DASHBOARD_HTML, bids=bids)
-    except Exception as e:
-        return f"<h3 style='color:red;'>Database Error: {e}</h3>"
+    global latest_scraped_bids, scraper_status
+    return render_template_string(DASHBOARD_HTML, bids=latest_scraped_bids, status=scraper_status)
 
 @app.route('/run-scraper')
 def trigger_scraper():
+    global scraper_status
+    scraper_status = "Scraping in progress... Please wait 2-3 minutes and refresh the page."
+    
     def run_pipeline():
+        global scraper_status
         try:
             pipeline = RFPDataIngestion()
             rfp_json_string = pipeline.execute_pipeline()
             master_rfp_list = json.loads(rfp_json_string)
-            intelligence_engine = DurmotIntelligence(DATABASE_URL)
-            intelligence_engine.insert_to_postgres(master_rfp_list)
+            intelligence_engine = DurmotIntelligence()
+            intelligence_engine.process_results(master_rfp_list)
         except Exception as e:
+            scraper_status = f"Error during scraping: {e}"
             logging.error(f"Background scraping failed: {e}")
             
     thread = threading.Thread(target=run_pipeline)
     thread.start()
-    return "<h3>Pipeline triggered in the background! <a href='/'>Return to Dashboard</a></h3>"
+    return "<h3>Live Pipeline triggered! <a href='/'>Return to Dashboard</a> and refresh in a few minutes.</h3>"
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
