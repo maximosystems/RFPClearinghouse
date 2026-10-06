@@ -38,7 +38,7 @@ class RFPDataIngestion:
         self.rfp_master_list = []
 
     def intercept_demandstar_xhr(self):
-        logging.info("Intercepting DemandStar XHR Feed (Hunting Mode)...")
+        logging.info("Intercepting DemandStar XHR Feed (No Commodity Filter)...")
         url = "https://api.demandstar.com/contents/content/v1/bids/search"
         
         raw_token = os.environ.get("DEMANDSTAR_TOKEN", "")
@@ -58,15 +58,15 @@ class RFPDataIngestion:
             else:
                 headers["authorization"] = auth_token if auth_token.startswith("Bearer ") else f"Bearer {auth_token}"
 
-        search_terms = ["software", "erp", "system", "technology", "billing"]
+        search_terms = ["software", "erp", "system", "technology", "billing", "implementation"]
         
         for term in search_terms:
-            # FIXED: includeExternalBids is now a true Boolean, not a string
+            # FIXED: Ripped out all 'Commodity' constraints so it ignores your empty profile
             payload = {
-                "searchKeyword": term,
                 "showBids": "externalBids",
-                "includeExternalBids": True, 
                 "bidStatus": "AC",
+                "bidName": term,
+                "includeExternalBids": "true",
                 "sortBy": "broadCastDate",
                 "sortOrder": "DESC",
                 "page": 1,
@@ -94,11 +94,7 @@ class RFPDataIngestion:
 
     def bypass_opengov_api(self):
         logging.info("Bypassing OpenGov Public APIs...")
-        # FIXED: Using verified, exact OpenGov database slugs for Florida
-        florida_portals = [
-            "cityoforlando", "tampa", "citrusbocc", 
-            "panamacity", "lakeland"
-        ]
+        florida_portals = ["orlando", "citrusfl", "cityofgainesville"]
         
         headers = {
             "accept": "application/json, text/plain, */*",
@@ -111,7 +107,7 @@ class RFPDataIngestion:
             url = f"https://api.procurement.opengov.com/api/v1/government/{portal}/project/public"
             payload = {
                 "filters": [{"type": "status", "value": "active"}],
-                "limit": 100,
+                "limit": 50,
                 "page": 1
             }
             try:
@@ -192,6 +188,26 @@ class DurmotIntelligence:
             pass
         return ""
 
+    def evaluate_temporal_anomaly(self, rfp):
+        pub_date_str = rfp.get('published_date')
+        deadline_str = None
+        
+        if "OpenGov" in rfp['source']:
+            deadline_str = rfp['raw_metadata'].get('proposalDeadline')
+        elif rfp['source'] == "DemandStar":
+            deadline_str = rfp['raw_metadata'].get('dueDate')
+            
+        if pub_date_str and deadline_str:
+            try:
+                pub_date = parser.parse(pub_date_str).replace(tzinfo=None)
+                deadline = parser.parse(deadline_str).replace(tzinfo=None)
+                delta_days = (deadline - pub_date).days
+                if 0 <= delta_days < 14:
+                    return 35, f"Suspiciously Short Deadline ({delta_days} Days)"
+            except Exception:
+                pass
+        return 0, None
+
     def score_and_flag(self, rfp):
         base_search_text = f"{rfp['title']} {rfp['agency']} {json.dumps(rfp['raw_metadata'])}".lower()
         
@@ -201,7 +217,8 @@ class DurmotIntelligence:
                 stack_matches.append(kw.replace(r"\b", "").strip().upper())
                 
         if not stack_matches:
-            return None
+            if not re.search(r'\b(software|system|erp|technology|billing|platform|cloud)\b', base_search_text):
+                return None
 
         deep_text = self.scrape_deep_text(rfp.get('url', ''))
         search_text = f"{base_search_text} {deep_text}"
@@ -217,6 +234,11 @@ class DurmotIntelligence:
             if re.search(pattern, search_text):
                 friction_score += points
                 friction_flags.append(pattern.replace(r"\b", "").strip().title())
+                
+        temporal_score, temporal_flag = self.evaluate_temporal_anomaly(rfp)
+        if temporal_flag:
+            friction_score += temporal_score
+            friction_flags.append(temporal_flag)
                 
         friction_score = min(friction_score, 100)
         rfp['friction_score'] = friction_score
