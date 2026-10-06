@@ -43,7 +43,7 @@ class RFPDataIngestion:
         self.rfp_master_list = []
 
     def intercept_demandstar_xhr(self):
-        logging.info("Intercepting DemandStar XHR Feed...")
+        logging.info("Intercepting DemandStar XHR Feed (Dumb Pipe Mode)...")
         url = "https://api.demandstar.com/contents/content/v1/bids/search"
         
         raw_token = os.environ.get("DEMANDSTAR_TOKEN", "")
@@ -63,42 +63,38 @@ class RFPDataIngestion:
             else:
                 headers["authorization"] = auth_token if auth_token.startswith("Bearer ") else f"Bearer {auth_token}"
 
-        search_terms = ["software", "erp", "system", "technology", "billing", "implementation"]
+        # FIXED PAYLOAD: No keywords, no external filters. Just the 300 newest active bids.
+        payload = {
+            "bidStatus": "AC",
+            "sortBy": "broadCastDate",
+            "sortOrder": "DESC",
+            "page": 1,
+            "limit": 300
+        }
         
-        for term in search_terms:
-            payload = {
-                "searchKeyword": term,
-                "showBids": "externalBids",
-                "bidStatus": "AC",
-                "includeExternalBids": "true",
-                "sortBy": "broadCastDate",
-                "sortOrder": "DESC",
-                "page": 1,
-                "limit": 50
-            }
-            try:
-                response = requests.post(url, headers=headers, json=payload, timeout=12)
-                if response.status_code == 200:
-                    data = response.json()
-                    bids = data.get('data', []) if isinstance(data, dict) else data
-                    
-                    for item in bids:
-                        self.rfp_master_list.append({
-                            "source": f"DemandStar-{term}",
-                            "title": item.get('bidName', 'Unknown Title'),
-                            "agency": item.get('agencyName', 'Unknown Agency'),
-                            "published_date": item.get('broadCastDate', ''),
-                            "raw_metadata": item,
-                            "url": f"https://www.demandstar.com/app/bids/{item.get('id', '')}"
-                        })
-                    logging.info(f"DemandStar extraction for '{term}': Found {len(bids)} bids.")
-                else:
-                    logging.warning(f"DemandStar returned {response.status_code} for term '{term}'")
-            except Exception as e:
-                logging.error(f"Failed to query DemandStar for '{term}': {e}")
+        try:
+            response = requests.post(url, headers=headers, json=payload, timeout=15)
+            if response.status_code == 200:
+                data = response.json()
+                bids = data.get('data', []) if isinstance(data, dict) else data
+                
+                for item in bids:
+                    self.rfp_master_list.append({
+                        "source": "DemandStar",
+                        "title": item.get('bidName', 'Unknown Title'),
+                        "agency": item.get('agencyName', 'Unknown Agency'),
+                        "published_date": item.get('broadCastDate', ''),
+                        "raw_metadata": item,
+                        "url": f"https://www.demandstar.com/app/bids/{item.get('id', '')}"
+                    })
+                logging.info(f"DemandStar extraction successful. Pulled {len(bids)} raw bids for local filtering.")
+            else:
+                logging.warning(f"DemandStar returned status code {response.status_code}")
+        except Exception as e:
+            logging.error(f"Failed to query DemandStar: {e}")
 
     def bypass_opengov_api(self):
-        logging.info("Bypassing OpenGov Public APIs...")
+        logging.info("Bypassing OpenGov Public APIs (Dumb Pipe Mode)...")
         florida_portals = [
             "orlando", "citrusfl", "cityofgainesville", 
             "fortlauderdale", "daytonabeach"
@@ -114,15 +110,13 @@ class RFPDataIngestion:
         
         for portal in florida_portals:
             url = f"https://api.procurement.opengov.com/api/v1/government/{portal}/project/public"
+            # FIXED PAYLOAD: Absolute bare minimum pagination to prevent API logic rejections
             payload = {
-                "filters": [],
                 "limit": 100,
-                "page": 1,
-                "sortField": "publishedAt",
-                "sortDirection": "DESC"
+                "page": 1
             }
             try:
-                response = requests.post(url, headers=headers, json=payload, timeout=8)
+                response = requests.post(url, headers=headers, json=payload, timeout=10)
                 if response.status_code == 200:
                     data = response.json()
                     projects = data.get('data', []) if isinstance(data, dict) else data
@@ -135,7 +129,7 @@ class RFPDataIngestion:
                             "raw_metadata": item,
                             "url": f"https://procurement.opengov.com/portal/{portal}/projects/{item.get('id')}" if item.get('id') else f"https://procurement.opengov.com/portal/{portal}"
                         })
-                    logging.info(f"OpenGov extraction for {portal}: Found {len(projects)} records.")
+                    logging.info(f"OpenGov extraction for {portal}: Pulled {len(projects)} raw records.")
                 else:
                     logging.warning(f"OpenGov {portal} returned {response.status_code}")
             except Exception as e:
@@ -254,13 +248,30 @@ class DurmotIntelligence:
         return 0, None
 
     def score_and_flag(self, rfp):
+        # We are pulling broad records, so we MUST check if it matches our tech stack FIRST
+        # to avoid downloading 300 construction PDFs.
+        base_search_text = f"{rfp['title']} {rfp['agency']} {json.dumps(rfp['raw_metadata'])}".lower()
+        
+        stack_matches = []
+        for kw in self.target_tech_stack:
+            if re.search(kw, base_search_text):
+                stack_matches.append(kw.replace(r"\b", "").strip().upper())
+                
+        # If the title/metadata has NO relation to IT software, drop it immediately
+        # (Saves the server from crashing by trying to read 300 PDFs)
+        if not stack_matches:
+            # Fallback: Check if common IT words are in the title at least
+            if not re.search(r'\b(software|system|erp|technology|billing|platform|cloud)\b', base_search_text):
+                return None
+
+        # If it passed the initial IT check, NOW we download the PDF to deep-scan it
         deep_text = self.scrape_deep_text(rfp.get('url', ''))
-        search_text = f"{rfp['title']} {rfp['agency']} {json.dumps(rfp['raw_metadata'])} {deep_text}".lower()
+        search_text = f"{base_search_text} {deep_text}"
         
         for pattern in self.disqualify_keywords:
             if re.search(pattern, search_text):
                 return None  
-                
+        
         friction_score = 0
         friction_flags = []
         
@@ -277,9 +288,9 @@ class DurmotIntelligence:
             friction_score += temporal_score
             friction_flags.append(temporal_flag)
                 
-        stack_matches = []
+        # Do one final deep-text check for tech stack in case the PDF had it but the title didn't
         for kw in self.target_tech_stack:
-            if re.search(kw, search_text):
+            if re.search(kw, search_text) and kw.replace(r"\b", "").strip().upper() not in stack_matches:
                 stack_matches.append(kw.replace(r"\b", "").strip().upper())
                 
         friction_score = min(friction_score, 100)
@@ -312,10 +323,9 @@ class DurmotIntelligence:
                 "url": rfp['url']
             })
             
-        # SORT FLIP: Lowest friction score (0) goes to the very top.
         processed_bids.sort(key=lambda x: x['friction_score'])
         
-        final_status = f"Last run successful. Qualified: {len(processed_bids)} RFPs | Disqualified Physical/Non-IT: {dropped_count} notices."
+        final_status = f"Last run successful. Qualified: {len(processed_bids)} RFPs | Disqualified Non-IT/Noise: {dropped_count} notices."
         set_state(final_status, processed_bids)
         logging.info(final_status)
 
@@ -344,8 +354,8 @@ DASHBOARD_HTML = """
         a { color: #58a6ff; text-decoration: none; }
         a:hover { text-decoration: underline; }
         .score { font-weight: bold; }
-        .score-high { color: #f85149; } /* Red for High Friction */
-        .score-low { color: #3fb950; }  /* Green for Zero Friction */
+        .score-high { color: #f85149; } 
+        .score-low { color: #3fb950; }  
         .badge { background-color: #b31d28; color: white; padding: 3px 8px; border-radius: 12px; font-size: 11px; margin-right: 4px; display: inline-block; margin-bottom: 3px; }
         .badge-tech { background-color: #1f6feb; }
         .badge-clean { background-color: #238636; }
