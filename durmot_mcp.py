@@ -200,21 +200,32 @@ def live_sunbiz_scrape(vendor_keyword):
     """Scrapes the live Florida Sunbiz directory to pierce the corporate veil on-demand."""
     logging.info(f"Initiating live Sunbiz scrape for: {vendor_keyword}")
     safe_keyword = urllib.parse.quote(vendor_keyword)
-    search_url = f"https://search.sunbiz.org/Inquiry/CorporationSearch/SearchResults/EntityName/{safe_keyword}/Page1"
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+    
+    # Using the more stable query parameter URL structure
+    search_url = f"https://search.sunbiz.org/Inquiry/CorporationSearch/SearchResults?inquiryType=EntityName&searchTerm={safe_keyword}"
+    
+    # Fortified headers to bypass basic bot protection
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.5",
+        "Connection": "keep-alive"
+    }
     
     try:
         res = requests.get(search_url, headers=headers, timeout=10)
         soup = BeautifulSoup(res.text, 'html.parser')
         
-        # Grab the first matching corporate entity in the search results
-        first_row = soup.find('td', class_='large-width')
-        if not first_row or not first_row.find('a'):
+        # Bulletproof target: Find the very first link containing 'SearchResultDetail'
+        detail_link = soup.find('a', href=re.compile(r'SearchResultDetail', re.IGNORECASE))
+        
+        if not detail_link:
+            page_title = soup.title.string.strip() if soup.title else "No Title"
+            logging.error(f"HTML Parse Failed. Sunbiz returned page title: {page_title}")
             return {"status": f"No active corporate records found on Sunbiz matching '{vendor_keyword}'."}
             
-        entity_name = first_row.text.strip()
-        detail_path = first_row.find('a')['href']
-        detail_url = f"https://search.sunbiz.org{detail_path}"
+        entity_name = detail_link.text.strip()
+        detail_url = f"https://search.sunbiz.org{detail_link['href']}"
         
         # Follow the link into the specific entity's filing page
         detail_res = requests.get(detail_url, headers=headers, timeout=10)
