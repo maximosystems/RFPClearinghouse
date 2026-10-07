@@ -1,5 +1,5 @@
 import os
-import ftplib
+import paramiko
 import requests
 import io
 import csv
@@ -39,7 +39,7 @@ class ForensicDataIngestion:
             )
         ''')
         
-        # Stream B: Campaign Finance Table (Note the Postgres 'SERIAL' datatype)
+        # Stream B: Campaign Finance Table
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS campaign_donations (
                 id SERIAL PRIMARY KEY,
@@ -54,26 +54,29 @@ class ForensicDataIngestion:
         conn.close()
         logging.info("Postgres schema fully synced.")
 
-    def ingest_sunbiz_ftp(self):
-        """Streams the massive state corporate registry directly into Postgres without overloading RAM."""
-        logging.info("Connecting to Florida Division of Corporations FTP...")
-        ftp_host = "sftp.floridados.gov"
+    def ingest_sunbiz_sftp(self):
+        """Streams the massive state corporate registry directly into Postgres using Secure FTP."""
+        logging.info("Connecting to Florida Division of Corporations SFTP...")
+        sftp_host = "sftp.floridados.gov"
         
         try:
-            ftp = ftplib.FTP(ftp_host)
-            ftp.login("Public", "PubAccess1845!")
-            ftp.cwd("/public/doc/corp/") 
+            # Initialize Secure SSH Transport
+            transport = paramiko.Transport((sftp_host, 22))
+            transport.connect(username="Public", password="PubAccess1845!")
+            sftp = paramiko.SFTPClient.from_transport(transport)
             
-            # The state routinely drops the active corporations list as a .txt file (e.g. cor20240101.txt)
-            files = ftp.nlst()
+            sftp.chdir('/public/doc/corp/') 
+            
+            files = sftp.listdir()
             target_file = next((f for f in files if 'cor' in f.lower() and f.endswith('.txt')), None)
             
             if not target_file:
                 logging.warning("Quarterly dump not found. Check state upload schedule.")
-                ftp.quit()
+                sftp.close()
+                transport.close()
                 return
 
-            logging.info(f"Target locked: {target_file}. Commencing streamed bulk extraction...")
+            logging.info(f"Target locked: {target_file}. Commencing SFTP streamed bulk extraction...")
             
             conn = self.get_connection()
             cursor = conn.cursor()
@@ -86,40 +89,37 @@ class ForensicDataIngestion:
             
             batch_data = []
             
-            # Callback function to process the text file line-by-line as it downloads
-            def process_line(line):
-                # NOTE: Sunbiz text files are fixed-width. 
-                # These slice indices are approximate based on standard FL corporate file definitions.
-                # You may need to tune these slices according to the official state data dictionary.
-                if len(line) < 100: return
-                doc_num = line[0:12].strip()
-                entity_name = line[12:204].strip()
-                status = line[204:205].strip() 
-                reg_agent = line[213:255].strip()
-                officer = line[514:556].strip() # Often the first principal/officer block
-                
-                batch_data.append((doc_num, entity_name, reg_agent, officer, status))
-                
-                # Flush to Postgres every 5,000 records to keep RAM usage near zero
-                if len(batch_data) >= 5000:
-                    execute_batch(cursor, insert_query, batch_data)
-                    conn.commit()
-                    batch_data.clear()
-
-            # Stream the file directly from the state FTP into the process_line callback
-            ftp.retrlines(f'RETR {target_file}', process_line)
+            # Paramiko allows us to iterate directly over the remote stream without downloading to RAM
+            with sftp.open(target_file, mode='rb') as remote_file:
+                for raw_line in remote_file:
+                    # Decode from binary to handle legacy character sets in state databases
+                    line = raw_line.decode('latin-1', errors='ignore')
+                    
+                    if len(line) < 100: continue
+                    doc_num = line[0:12].strip()
+                    entity_name = line[12:204].strip()
+                    status = line[204:205].strip() 
+                    reg_agent = line[213:255].strip()
+                    officer = line[514:556].strip() 
+                    
+                    batch_data.append((doc_num, entity_name, reg_agent, officer, status))
+                    
+                    if len(batch_data) >= 5000:
+                        execute_batch(cursor, insert_query, batch_data)
+                        conn.commit()
+                        batch_data.clear()
             
-            # Catch any remaining records in the final batch
             if batch_data:
                 execute_batch(cursor, insert_query, batch_data)
                 conn.commit()
 
             conn.close()
-            ftp.quit()
+            sftp.close()
+            transport.close()
             logging.info("Statewide Corporate Registry successfully staged in Postgres.")
             
         except Exception as e:
-            logging.error(f"Sunbiz Ingestion failed: {e}")
+            logging.error(f"Sunbiz SFTP Ingestion failed: {e}")
 
     def ingest_campaign_finance(self, election_year="2024"):
         """Intercepts the raw donation CSV and bulk-inserts it into Postgres."""
@@ -147,7 +147,6 @@ class ForensicDataIngestion:
                 csv_data = response.text
                 reader = csv.reader(io.StringIO(csv_data))
                 
-                # Skip the state's header row
                 next(reader, None) 
                 
                 conn = self.get_connection()
@@ -162,16 +161,14 @@ class ForensicDataIngestion:
                 for row in reader:
                     if len(row) < 10: continue
                     
-                    # Columns vary by state export, typical index maps:
                     contributor = row[3].strip()
                     date = row[0].strip()
                     amount_str = row[1].replace('$', '').replace(',', '').strip()
                     amount = float(amount_str) if amount_str else 0.0
-                    pac = row[9].strip() # Recipient Candidate/PAC
+                    pac = row[9].strip()
                     
                     batch_data.append((contributor, amount, date, pac, election_year))
                 
-                # Execute the bulk insert
                 execute_batch(cursor, insert_query, batch_data)
                 conn.commit()
                 conn.close()
@@ -185,5 +182,5 @@ class ForensicDataIngestion:
 if __name__ == "__main__":
     engine = ForensicDataIngestion()
     if engine.db_url:
-        engine.ingest_sunbiz_ftp()
-        engine.ingest_campaign_finance("2024")
+        engine.ingest_sunbiz_sftp()
+        # engine.ingest_campaign_finance("2024")
