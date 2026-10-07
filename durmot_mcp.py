@@ -209,8 +209,10 @@ def live_sunbiz_scrape(vendor_keyword):
     }
 
     try:
-        # 1. Single stealth request. No warmup ping to avoid triggering speed limits.
-        res = tls_requests.get(search_url, headers=headers, impersonate="chrome120", timeout=15)
+        # Re-adding Session object so we don't drop the cookie when clicking into the detail page
+        session = tls_requests.Session(impersonate="chrome120")
+        
+        res = session.get(search_url, headers=headers, timeout=15)
         soup = BeautifulSoup(res.text, 'html.parser')
         
         detail_link = soup.find('a', href=re.compile(r'SearchResultDetail', re.IGNORECASE))
@@ -223,8 +225,8 @@ def live_sunbiz_scrape(vendor_keyword):
         entity_name = detail_link.text.strip()
         detail_url = f"https://search.sunbiz.org{detail_link['href']}"
         
-        # 2. Second stealth request to the specific entity
-        detail_res = tls_requests.get(detail_url, headers=headers, impersonate="chrome120", timeout=15)
+        # Uses the exact same session to view the specific filing
+        detail_res = session.get(detail_url, headers=headers, timeout=15)
         detail_soup = BeautifulSoup(detail_res.text, 'html.parser')
         
         officers = []
@@ -272,8 +274,9 @@ def live_campaign_finance_query(search_term, is_entity=False):
     
     if is_entity:
         first_name = ""
-        # Remove INC, LLC, etc from the search target so the DB finds it
-        last_name = search_term.replace('INC.', '').replace('LLC', '').split(',')[0].strip()
+        # Strip out corporate suffixes so the DB finds the root name "ASHBRITT"
+        clean_name = re.sub(r'\b(INC\.|INC|LLC|CORP|CORPORATION|CO|LTD)\b', '', search_term, flags=re.IGNORECASE)
+        last_name = clean_name.replace(',', '').strip().split()[0]
     else:
         if ',' in search_term:
             last_name = search_term.split(',')[0].strip()
@@ -284,13 +287,13 @@ def live_campaign_finance_query(search_term, is_entity=False):
             first_name = parts[0]
             last_name = parts[-1]
 
-    # CRITICAL FIX: The Florida Database uses ConFName and ConLName, not First_Name/Last_Name
+    # Reverted to standard form keys First_Name/Last_Name
     payload = {
         "election_year": "All",
         "search_type": "All",
         "format": "csv",
-        "ConFName": first_name,
-        "ConLName": last_name,
+        "First_Name": first_name,
+        "Last_Name": last_name,
         "submit": "Submit"
     }
     
@@ -395,5 +398,3 @@ def audit_vendor_pay_to_play(vendor_keyword: str) -> str:
 
 if __name__ == "__main__":
     # Expose the server using Server-Sent Events (SSE) so clients can connect over the internet via Railway.
-    port = int(os.environ.get("PORT", 8000))
-    mcp.run(transport='sse', host='0.0.0.0', port=port)
