@@ -204,17 +204,12 @@ def live_sunbiz_scrape(vendor_keyword):
     search_url = f"https://search.sunbiz.org/Inquiry/CorporationSearch/SearchResults?inquiryType=EntityName&searchTerm={safe_keyword}"
     
     try:
-        # Rotate browser fingerprints to avoid static detection
         browsers = ["chrome116", "chrome110", "edge101", "safari15_5"]
         fp = random.choice(browsers)
         
-        # Open a persistent session to hold the Cloudflare clearance cookie
         session = tls_requests.Session(impersonate=fp)
-        
-        # WARMUP: Quietly ping the root domain to get cleared by Cloudflare first
         session.get("https://search.sunbiz.org/", timeout=10)
         
-        # EXECUTE: Run the actual search using the cleared session
         res = session.get(search_url, timeout=15)
         soup = BeautifulSoup(res.text, 'html.parser')
         
@@ -222,47 +217,41 @@ def live_sunbiz_scrape(vendor_keyword):
         
         if not detail_link:
             page_title = soup.title.string.strip() if soup.title else "No Title"
-            logging.error(f"HTML Parse Failed. Sunbiz returned page title: {page_title} (Fingerprint: {fp})")
+            logging.error(f"HTML Parse Failed. Sunbiz returned page title: {page_title}")
             return {"status": f"No active corporate records found on Sunbiz matching '{vendor_keyword}'."}
             
         entity_name = detail_link.text.strip()
         detail_url = f"https://search.sunbiz.org{detail_link['href']}"
         
-        # Follow the link into the specific entity's filing page
         detail_res = session.get(detail_url, timeout=15)
         detail_soup = BeautifulSoup(detail_res.text, 'html.parser')
         
         officers = []
-        # Bulletproof parser: Grab all text blocks, ignore HTML tags entirely, and strip dead space
         for div in detail_soup.find_all('div', class_='detailSection'):
-            # The 'strip=True' forces all actual text lines together, eliminating empty HTML gaps
             raw_text = div.get_text(separator='\n', strip=True).upper()
             
-            # Look for ANY block related to leadership or agents (LLCs use Managers/Members)
             if any(kw in raw_text for kw in ['OFFICER', 'DIRECTOR', 'MANAGER', 'MEMBER', 'AUTHORIZED', 'AGENT']):
                 for line in raw_text.split('\n'):
                     line = line.strip()
-                    # Valid name: At least 2 words, no numbers (filters out most addresses)
                     if line and len(line.split()) >= 2 and not any(c.isdigit() for c in line):
-                        # Words we expect to see in labels, titles, and addresses, but never in a real human name
+                        # Added PDF, IMAGE, VIEW, PLLC, PA, LAW to ignore list
                         ignore_words = {
                             'TITLE', 'NAME', 'ADDRESS', 'DETAIL', 'REGISTERED', 'AGENT', 
                             'FLORIDA', 'LLC', 'INC', 'ST', 'AVE', 'BLVD', 'RD', 'LN', 'WAY', 
                             'CT', 'DR', 'STE', 'APT', 'DEPT', 'RM', 'STREET', 'AVENUE', 
                             'BOULEVARD', 'ROAD', 'LANE', 'COURT', 'DRIVE', 'SUITE', 'ROOM', 
                             'UNIT', 'PO', 'BOX', 'CORP', 'CORPORATION', 'COMPANY', 'MANAGEMENT', 
-                            'CITY', 'STATE', 'ZIP', 'CODE'
+                            'CITY', 'STATE', 'ZIP', 'CODE', 'VIEW', 'IMAGE', 'PDF', 'FORMAT',
+                            'PLLC', 'LAW', 'PA', 'FIRM', 'GROUP', 'HOLDINGS', 'TRUST'
                         }
-                        # Strip punctuation to evaluate just the core letters of the line
                         line_words = set(re.sub(r'[^A-Z\s]', '', line).split())
                         
-                        # If this line isn't just a label, header, or address part, it is a person's name
                         if not line_words.intersection(ignore_words):
                             if line not in officers:
                                 officers.append(line)
                                 
         if not officers:
-            officers = ["(Officers could not be parsed dynamically - Check Sunbiz URL directly)"]
+            officers = ["(Officers could not be parsed dynamically - Check Sunbiz URL)"]
 
         return {
             "entity_name": entity_name,
@@ -273,20 +262,29 @@ def live_sunbiz_scrape(vendor_keyword):
         logging.error(f"Sunbiz extraction failed: {e}")
         return {"error": f"Live scraping failed: {str(e)}"}
 
-def live_campaign_finance_query(officer_name):
+def live_campaign_finance_query(search_term, is_entity=False):
     """Intercepts the live Division of Elections API to track political donations."""
-    logging.info(f"Querying Division of Elections for officer: {officer_name}")
+    logging.info(f"Querying Division of Elections for: {search_term}")
     url = "https://dos.elections.myflorida.com/campaign-finance/contributions/"
     headers = {
         "Content-Type": "application/x-www-form-urlencoded"
     }
     
-    # Sunbiz formats names inconsistently. We split to grab the safest first and last name targets.
-    parts = officer_name.replace(',', '').split()
-    if len(parts) < 2: return []
-    
-    first_name = parts[-1] if ',' in officer_name else parts[0]
-    last_name = parts[0] if ',' in officer_name else parts[-1]
+    if is_entity:
+        # If searching a corporate entity, we just use the first primary word as the Last_Name
+        first_name = ""
+        last_name = search_term.split()[0].replace(',', '').strip()
+    else:
+        # Precision name parsing for human officers
+        if ',' in search_term:
+            # Format: LASTNAME, FIRSTNAME MIDDLENAME -> Extracts LASTNAME and FIRSTNAME
+            last_name = search_term.split(',')[0].strip()
+            first_name = search_term.split(',')[1].strip().split()[0]
+        else:
+            parts = search_term.split()
+            if len(parts) < 2: return []
+            first_name = parts[0]
+            last_name = parts[-1]
 
     payload = {
         "election_year": "All",
@@ -316,10 +314,9 @@ def live_campaign_finance_query(officer_name):
                     "election_year": row[10].strip() if len(row) > 10 else "N/A"
                 })
     except Exception as e:
-        logging.error(f"Elections API query failed for {officer_name}: {e}")
+        logging.error(f"Elections API query failed for {search_term}: {e}")
         pass
     
-    # Sort by largest donations and return the top 15
     donations.sort(key=lambda x: x['amount'], reverse=True)
     return donations[:15]
 
@@ -376,12 +373,22 @@ def audit_vendor_pay_to_play(vendor_keyword: str) -> str:
         "political_donations_found": []
     }
     
+    # 1. Investigate the Corporate Entity Itself
+    entity_donations = live_campaign_finance_query(entity_name, is_entity=True)
+    if entity_donations:
+        report["political_donations_found"].append({
+            "target": f"{entity_name} (Corporate Account)",
+            "total_contributions_found": len(entity_donations),
+            "top_donations": entity_donations
+        })
+    
+    # 2. Investigate the Human Officers
     for officer in officers:
         if "(Officers" in officer: continue
-        donations = live_campaign_finance_query(officer)
+        donations = live_campaign_finance_query(officer, is_entity=False)
         if donations:
             report["political_donations_found"].append({
-                "officer": officer,
+                "target": officer,
                 "total_contributions_found": len(donations),
                 "top_donations": donations
             })
