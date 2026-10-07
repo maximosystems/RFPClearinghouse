@@ -1,4 +1,3 @@
-Python
 import sys
 import os
 import re
