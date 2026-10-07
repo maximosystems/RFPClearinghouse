@@ -66,12 +66,20 @@ class ForensicDataIngestion:
             transport.connect(username="Public", password="PubAccess1845!")
             sftp = paramiko.SFTPClient.from_transport(transport)
             
-            # The state stores the full active registry as a ZIP file in the quarterly folder
             sftp.chdir('/Public/doc/quarterly/cor/') 
-            target_file = 'cordata.zip'
+            
+            # Dynamically target the cordata archive regardless of what date they append to it
+            files = sftp.listdir()
+            target_file = next((f for f in files if f.startswith('cordata') and f.endswith('.zip')), None)
+            
+            if not target_file:
+                logging.warning("Quarterly cordata archive not found. Check state upload directory.")
+                sftp.close()
+                transport.close()
+                return
             
             logging.info(f"Target locked: {target_file}. Downloading master archive to container...")
-            local_zip = '/app/cordata.zip'
+            local_zip = f'/app/{target_file}'
             
             # Download the zip file to the Railway container's ephemeral disk
             sftp.get(target_file, local_zip)
