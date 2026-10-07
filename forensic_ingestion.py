@@ -65,7 +65,8 @@ class ForensicDataIngestion:
             transport.connect(username="Public", password="PubAccess1845!")
             sftp = paramiko.SFTPClient.from_transport(transport)
             
-            sftp.chdir('/public/doc/corp/') 
+            # CRITICAL FIX: Capital 'P' and 'cor' instead of 'corp' for the state's internal directory
+            sftp.chdir('/Public/doc/cor/') 
             
             files = sftp.listdir()
             target_file = next((f for f in files if 'cor' in f.lower() and f.endswith('.txt')), None)
