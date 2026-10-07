@@ -3,10 +3,11 @@ import os
 import re
 import io
 import json
-import sqlite3
 import logging
 import requests
 import urllib.parse
+import psycopg2
+from psycopg2.extras import RealDictCursor
 from datetime import datetime
 from dateutil import parser
 from bs4 import BeautifulSoup
@@ -15,7 +16,7 @@ from pypdf import PdfReader
 # FastMCP SDK
 from fastmcp import FastMCP
 
-# OPSEC CRITICAL: All logs must go to stderr. MCP uses stdout for JSON-RPC data transfer.
+# OPSEC CRITICAL: All logs must go to stderr. 
 logging.basicConfig(
     level=logging.INFO, 
     format='%(asctime)s - %(levelname)s - %(message)s',
@@ -23,7 +24,6 @@ logging.basicConfig(
 )
 
 mcp = FastMCP("Durmot Lead & Forensic Engine")
-DB_PATH = "durmot_forensic.db"
 
 # ==============================================================================
 # SECTION 1: GOVTECH SCRAPING & FRICTION ENGINE
@@ -194,19 +194,26 @@ class DurmotIntelligence:
         return processed
 
 # ==============================================================================
-# SECTION 2: FORENSIC TRIAD ENGINE (LOCAL SQL QUERIES)
+# SECTION 2: FORENSIC TRIAD ENGINE (POSTGRES CLOUD QUERIES)
 # ==============================================================================
 
 def query_db(query, params=()):
-    if not os.path.exists(DB_PATH):
-        return None
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    cursor = conn.cursor()
-    cursor.execute(query, params)
-    rows = [dict(r) for r in cursor.fetchall()]
-    conn.close()
-    return rows
+    db_url = os.environ.get("DATABASE_URL")
+    if not db_url:
+        logging.error("DATABASE_URL not found. Cannot query Postgres.")
+        return []
+        
+    try:
+        conn = psycopg2.connect(db_url)
+        # RealDictCursor returns rows as dictionaries, matching the old SQLite row_factory behavior
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute(query, params)
+        rows = cursor.fetchall()
+        conn.close()
+        return [dict(r) for r in rows]
+    except Exception as e:
+        logging.error(f"Database query failed: {e}")
+        return []
 
 # ==============================================================================
 # SECTION 3: MCP EXPOSED TOOLS
@@ -244,22 +251,23 @@ def audit_vendor_pay_to_play(vendor_keyword: str) -> str:
     Forensic Triad Tool: Cross-references Florida Sunbiz corporate ownership records 
     against state PAC/campaign finance contributions to detect kickback pathways and pay-to-play anomalies.
     """
-    if not os.path.exists(DB_PATH):
+    if not os.environ.get("DATABASE_URL"):
         return json.dumps({
-            "error": "Forensic database not detected. Run forensic_ingestion.py to populate state records."
+            "error": "Railway Postgres database URL not detected in environment variables."
         })
 
-    # Search corporate registry for the vendor entity and its officers
+    # Search corporate registry for the vendor entity and its officers.
+    # Note: Postgres uses %s instead of ? for parameters, and ILIKE for case-insensitive matches.
     entity_sql = """
         SELECT document_number, entity_name, registered_agent_name, officer_name, status
         FROM florida_entities
-        WHERE entity_name LIKE ? OR officer_name LIKE ?
+        WHERE entity_name ILIKE %s OR officer_name ILIKE %s
         LIMIT 10
     """
     entities = query_db(entity_sql, (f"%{vendor_keyword}%", f"%{vendor_keyword}%"))
 
     if not entities:
-        return json.dumps({"status": f"No corporate records found on Sunbiz matching '{vendor_keyword}'."})
+        return json.dumps({"status": f"No corporate records found in Postgres matching '{vendor_keyword}'."})
 
     report = []
     for ent in entities:
@@ -270,7 +278,7 @@ def audit_vendor_pay_to_play(vendor_keyword: str) -> str:
             donation_sql = """
                 SELECT contributor_name, amount, date, recipient_pac, election_year
                 FROM campaign_donations
-                WHERE contributor_name LIKE ?
+                WHERE contributor_name ILIKE %s
                 ORDER BY amount DESC
                 LIMIT 15
             """
@@ -287,4 +295,6 @@ def audit_vendor_pay_to_play(vendor_keyword: str) -> str:
     return json.dumps(report, indent=2)
 
 if __name__ == "__main__":
-    mcp.run()
+    # Expose the server using Server-Sent Events (SSE) so Claude can connect to it over the internet via Railway.
+    port = int(os.environ.get("PORT", 8000))
+    mcp.run(transport='sse', host='0.0.0.0', port=port)
