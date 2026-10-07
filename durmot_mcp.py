@@ -67,7 +67,7 @@ class RFPDataIngestion:
                 "limit": 50
             }
             try:
-                response = tls_requests.post(url, headers=headers, json=payload, impersonate="chrome116", timeout=12)
+                response = tls_requests.post(url, headers=headers, json=payload, impersonate="chrome120", timeout=12)
                 if response.status_code == 200:
                     data = response.json()
                     bids = data.get('result', []) if isinstance(data, dict) else data
@@ -96,7 +96,7 @@ class RFPDataIngestion:
             url = f"https://api.procurement.opengov.com/api/v1/government/{portal}/project/public"
             payload = {"filters": [{"type": "status", "value": "active"}], "limit": 50, "page": 1}
             try:
-                response = tls_requests.post(url, headers=headers, json=payload, impersonate="chrome116", timeout=10)
+                response = tls_requests.post(url, headers=headers, json=payload, impersonate="chrome120", timeout=10)
                 if response.status_code == 200:
                     data = response.json()
                     projects = data.get('data', []) if isinstance(data, dict) else data
@@ -140,7 +140,7 @@ class DurmotIntelligence:
     def scrape_deep_text(self, url):
         if not url: return ""
         try:
-            res = tls_requests.get(url, impersonate="chrome116", timeout=5)
+            res = tls_requests.get(url, impersonate="chrome120", timeout=5)
             if res.status_code == 200:
                 if url.lower().endswith('.pdf') or 'application/pdf' in res.headers.get('Content-Type', '').lower():
                     reader = PdfReader(io.BytesIO(res.content))
@@ -203,14 +203,14 @@ def live_sunbiz_scrape(vendor_keyword):
     safe_keyword = urllib.parse.quote(vendor_keyword)
     search_url = f"https://search.sunbiz.org/Inquiry/CorporationSearch/SearchResults?inquiryType=EntityName&searchTerm={safe_keyword}"
     
+    headers = {
+        "Referer": "https://search.sunbiz.org/Inquiry/CorporationSearch/ByName",
+        "Accept-Language": "en-US,en;q=0.9"
+    }
+
     try:
-        browsers = ["chrome116", "chrome110", "edge101", "safari15_5"]
-        fp = random.choice(browsers)
-        
-        session = tls_requests.Session(impersonate=fp)
-        session.get("https://search.sunbiz.org/", timeout=10)
-        
-        res = session.get(search_url, timeout=15)
+        # 1. Single stealth request. No warmup ping to avoid triggering speed limits.
+        res = tls_requests.get(search_url, headers=headers, impersonate="chrome120", timeout=15)
         soup = BeautifulSoup(res.text, 'html.parser')
         
         detail_link = soup.find('a', href=re.compile(r'SearchResultDetail', re.IGNORECASE))
@@ -223,7 +223,8 @@ def live_sunbiz_scrape(vendor_keyword):
         entity_name = detail_link.text.strip()
         detail_url = f"https://search.sunbiz.org{detail_link['href']}"
         
-        detail_res = session.get(detail_url, timeout=15)
+        # 2. Second stealth request to the specific entity
+        detail_res = tls_requests.get(detail_url, headers=headers, impersonate="chrome120", timeout=15)
         detail_soup = BeautifulSoup(detail_res.text, 'html.parser')
         
         officers = []
@@ -234,7 +235,6 @@ def live_sunbiz_scrape(vendor_keyword):
                 for line in raw_text.split('\n'):
                     line = line.strip()
                     if line and len(line.split()) >= 2 and not any(c.isdigit() for c in line):
-                        # Added PDF, IMAGE, VIEW, PLLC, PA, LAW to ignore list
                         ignore_words = {
                             'TITLE', 'NAME', 'ADDRESS', 'DETAIL', 'REGISTERED', 'AGENT', 
                             'FLORIDA', 'LLC', 'INC', 'ST', 'AVE', 'BLVD', 'RD', 'LN', 'WAY', 
@@ -271,13 +271,11 @@ def live_campaign_finance_query(search_term, is_entity=False):
     }
     
     if is_entity:
-        # If searching a corporate entity, we just use the first primary word as the Last_Name
         first_name = ""
-        last_name = search_term.split()[0].replace(',', '').strip()
+        # Remove INC, LLC, etc from the search target so the DB finds it
+        last_name = search_term.replace('INC.', '').replace('LLC', '').split(',')[0].strip()
     else:
-        # Precision name parsing for human officers
         if ',' in search_term:
-            # Format: LASTNAME, FIRSTNAME MIDDLENAME -> Extracts LASTNAME and FIRSTNAME
             last_name = search_term.split(',')[0].strip()
             first_name = search_term.split(',')[1].strip().split()[0]
         else:
@@ -286,19 +284,19 @@ def live_campaign_finance_query(search_term, is_entity=False):
             first_name = parts[0]
             last_name = parts[-1]
 
+    # CRITICAL FIX: The Florida Database uses ConFName and ConLName, not First_Name/Last_Name
     payload = {
         "election_year": "All",
         "search_type": "All",
         "format": "csv",
-        "First_Name": first_name,
-        "Last_Name": last_name,
+        "ConFName": first_name,
+        "ConLName": last_name,
         "submit": "Submit"
     }
     
     donations = []
     try:
-        session = tls_requests.Session(impersonate="chrome116")
-        res = session.post(url, data=payload, headers=headers, timeout=15)
+        res = tls_requests.post(url, data=payload, headers=headers, impersonate="chrome120", timeout=15)
         if res.status_code == 200:
             reader = csv.reader(io.StringIO(res.text))
             next(reader, None) # Skip the CSV header
