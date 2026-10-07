@@ -5,6 +5,7 @@ import io
 import csv
 import logging
 import psycopg2
+import zipfile
 from psycopg2.extras import execute_batch
 
 # Route logs to stderr to protect the future MCP stdio transport
@@ -65,19 +66,15 @@ class ForensicDataIngestion:
             transport.connect(username="Public", password="PubAccess1845!")
             sftp = paramiko.SFTPClient.from_transport(transport)
             
-            # CRITICAL FIX: Capital 'P' and 'cor' instead of 'corp' for the state's internal directory
-            sftp.chdir('/Public/doc/cor/') 
+            # The state stores the full active registry as a ZIP file in the quarterly folder
+            sftp.chdir('/Public/doc/quarterly/cor/') 
+            target_file = 'cordata.zip'
             
-            files = sftp.listdir()
-            target_file = next((f for f in files if 'cor' in f.lower() and f.endswith('.txt')), None)
+            logging.info(f"Target locked: {target_file}. Downloading master archive to container...")
+            local_zip = '/app/cordata.zip'
             
-            if not target_file:
-                logging.warning("Quarterly dump not found. Check state upload schedule.")
-                sftp.close()
-                transport.close()
-                return
-
-            logging.info(f"Target locked: {target_file}. Commencing SFTP streamed bulk extraction...")
+            # Download the zip file to the Railway container's ephemeral disk
+            sftp.get(target_file, local_zip)
             
             conn = self.get_connection()
             cursor = conn.cursor()
@@ -90,25 +87,29 @@ class ForensicDataIngestion:
             
             batch_data = []
             
-            # Paramiko allows us to iterate directly over the remote stream without downloading to RAM
-            with sftp.open(target_file, mode='rb') as remote_file:
-                for raw_line in remote_file:
-                    # Decode from binary to handle legacy character sets in state databases
-                    line = raw_line.decode('latin-1', errors='ignore')
-                    
-                    if len(line) < 100: continue
-                    doc_num = line[0:12].strip()
-                    entity_name = line[12:204].strip()
-                    status = line[204:205].strip() 
-                    reg_agent = line[213:255].strip()
-                    officer = line[514:556].strip() 
-                    
-                    batch_data.append((doc_num, entity_name, reg_agent, officer, status))
-                    
-                    if len(batch_data) >= 5000:
-                        execute_batch(cursor, insert_query, batch_data)
-                        conn.commit()
-                        batch_data.clear()
+            # Extract and parse the split text files directly from the ZIP
+            with zipfile.ZipFile(local_zip, 'r') as z:
+                txt_files = [f for f in z.namelist() if f.endswith('.txt')]
+                for txt_file in txt_files:
+                    logging.info(f"Parsing extracted file: {txt_file}...")
+                    with z.open(txt_file) as f:
+                        for raw_line in f:
+                            # Decode from binary to handle legacy character sets in state databases
+                            line = raw_line.decode('latin-1', errors='ignore')
+                            
+                            if len(line) < 100: continue
+                            doc_num = line[0:12].strip()
+                            entity_name = line[12:204].strip()
+                            status = line[204:205].strip() 
+                            reg_agent = line[213:255].strip()
+                            officer = line[514:556].strip() 
+                            
+                            batch_data.append((doc_num, entity_name, reg_agent, officer, status))
+                            
+                            if len(batch_data) >= 5000:
+                                execute_batch(cursor, insert_query, batch_data)
+                                conn.commit()
+                                batch_data.clear()
             
             if batch_data:
                 execute_batch(cursor, insert_query, batch_data)
@@ -117,6 +118,11 @@ class ForensicDataIngestion:
             conn.close()
             sftp.close()
             transport.close()
+            
+            # Clean up the zip file to free up Railway server space
+            if os.path.exists(local_zip):
+                os.remove(local_zip)
+                
             logging.info("Statewide Corporate Registry successfully staged in Postgres.")
             
         except Exception as e:
