@@ -185,5 +185,5 @@ class ForensicDataIngestion:
 if __name__ == "__main__":
     engine = ForensicDataIngestion()
     if engine.db_url:
-        # engine.ingest_sunbiz_ftp()
+        engine.ingest_sunbiz_ftp()
         engine.ingest_campaign_finance("2024")
