@@ -233,20 +233,30 @@ def live_sunbiz_scrape(vendor_keyword):
         detail_soup = BeautifulSoup(detail_res.text, 'html.parser')
         
         officers = []
-        # Bulletproof parser: Grab all text blocks, ignore HTML tags entirely
+        # Bulletproof parser: Grab all text blocks, ignore HTML tags entirely, and strip dead space
         for div in detail_soup.find_all('div', class_='detailSection'):
-            text_lines = div.get_text(separator='\n').split('\n')
-            section_header = text_lines[0].upper() if text_lines else ""
+            # The 'strip=True' forces all actual text lines together, eliminating empty HTML gaps
+            raw_text = div.get_text(separator='\n', strip=True).upper()
             
             # Look for ANY block related to leadership or agents (LLCs use Managers/Members)
-            if any(kw in section_header for kw in ['OFFICER', 'DIRECTOR', 'MANAGER', 'MEMBER', 'AUTHORIZED', 'AGENT']):
-                for line in text_lines:
-                    line = line.strip().upper()
-                    # Valid name: At least 2 words, no numbers (filters out addresses), no PO BOX
-                    if line and len(line.split()) >= 2 and not any(c.isdigit() for c in line) and "BOX" not in line:
-                        ignore_words = {'TITLE', 'NAME', 'ADDRESS', 'DETAIL', 'REGISTERED', 'AGENT', 'FLORIDA', 'LLC', 'INC'}
+            if any(kw in raw_text for kw in ['OFFICER', 'DIRECTOR', 'MANAGER', 'MEMBER', 'AUTHORIZED', 'AGENT']):
+                for line in raw_text.split('\n'):
+                    line = line.strip()
+                    # Valid name: At least 2 words, no numbers (filters out most addresses)
+                    if line and len(line.split()) >= 2 and not any(c.isdigit() for c in line):
+                        # Words we expect to see in labels, titles, and addresses, but never in a real human name
+                        ignore_words = {
+                            'TITLE', 'NAME', 'ADDRESS', 'DETAIL', 'REGISTERED', 'AGENT', 
+                            'FLORIDA', 'LLC', 'INC', 'ST', 'AVE', 'BLVD', 'RD', 'LN', 'WAY', 
+                            'CT', 'DR', 'STE', 'APT', 'DEPT', 'RM', 'STREET', 'AVENUE', 
+                            'BOULEVARD', 'ROAD', 'LANE', 'COURT', 'DRIVE', 'SUITE', 'ROOM', 
+                            'UNIT', 'PO', 'BOX', 'CORP', 'CORPORATION', 'COMPANY', 'MANAGEMENT', 
+                            'CITY', 'STATE', 'ZIP', 'CODE'
+                        }
+                        # Strip punctuation to evaluate just the core letters of the line
                         line_words = set(re.sub(r'[^A-Z\s]', '', line).split())
-                        # If this line isn't just a label/header, it's a person's name
+                        
+                        # If this line isn't just a label, header, or address part, it is a person's name
                         if not line_words.intersection(ignore_words):
                             if line not in officers:
                                 officers.append(line)
@@ -297,88 +307,4 @@ def live_campaign_finance_query(officer_name):
             
             for row in reader:
                 if len(row) < 10: continue
-                amount_str = row[1].replace('$', '').replace(',', '').strip()
-                amount = float(amount_str) if amount_str else 0.0
-                donations.append({
-                    "date": row[0].strip(),
-                    "amount": amount,
-                    "recipient_pac": row[9].strip(),
-                    "election_year": row[10].strip() if len(row) > 10 else "N/A"
-                })
-    except Exception as e:
-        logging.error(f"Elections API query failed for {officer_name}: {e}")
-        pass
-    
-    # Sort by largest donations and return the top 15
-    donations.sort(key=lambda x: x['amount'], reverse=True)
-    return donations[:15]
-
-# ==============================================================================
-# SECTION 3: MCP EXPOSED TOOLS
-# ==============================================================================
-
-@mcp.tool
-def get_clean_leads() -> str:
-    """
-    Scrapes live municipal notices across Florida, applies the proprietary 
-    Friction Score to filter out rigged bids, and returns zero-friction Prime Leads.
-    """
-    pipeline = RFPDataIngestion()
-    pipeline.execute_pipeline()
-    intelligence = DurmotIntelligence()
-    results = intelligence.process_results(pipeline.rfp_master_list)
-    prime = [b for b in results if b['friction_score'] == 0]
-    return json.dumps(prime if prime else {"status": "No zero-friction Prime Leads found today."}, indent=2)
-
-@mcp.tool
-def run_friction_audit(agency_keyword: str) -> str:
-    """
-    Forensically audits active procurement notices for a specific agency keyword 
-    (e.g., 'Orlando', 'Citrus') to expose incumbent traps, sole-source flags, and lock-in language.
-    """
-    pipeline = RFPDataIngestion()
-    pipeline.execute_pipeline()
-    intelligence = DurmotIntelligence()
-    results = intelligence.process_results(pipeline.rfp_master_list)
-    filtered = [b for b in results if agency_keyword.lower() in b['agency'].lower()]
-    return json.dumps(filtered if filtered else {"status": f"No active bids found matching '{agency_keyword}'."}, indent=2)
-
-@mcp.tool
-def audit_vendor_pay_to_play(vendor_keyword: str) -> str:
-    """
-    Forensic Triad Tool (Lightweight): Cross-references live Florida Sunbiz ownership records 
-    against live state PAC/campaign finance contributions to detect pay-to-play anomalies.
-    Requires no database.
-    """
-    sunbiz_data = live_sunbiz_scrape(vendor_keyword)
-    
-    if "status" in sunbiz_data or "error" in sunbiz_data:
-        return json.dumps([sunbiz_data], indent=2)
-    
-    entity_name = sunbiz_data["entity_name"]
-    officers = sunbiz_data["officers"]
-    
-    report = {
-        "vendor_keyword_searched": vendor_keyword,
-        "entity_found": entity_name,
-        "sunbiz_source_url": sunbiz_data["sunbiz_url"],
-        "officers_investigated": officers,
-        "political_donations_found": []
-    }
-    
-    for officer in officers:
-        if "(Officers" in officer: continue
-        donations = live_campaign_finance_query(officer)
-        if donations:
-            report["political_donations_found"].append({
-                "officer": officer,
-                "total_contributions_found": len(donations),
-                "top_donations": donations
-            })
-            
-    return json.dumps([report], indent=2)
-
-if __name__ == "__main__":
-    # Expose the server using Server-Sent Events (SSE) so clients can connect over the internet via Railway.
-    port = int(os.environ.get("PORT", 8000))
-    mcp.run(transport='sse', host='0.0.0.0', port=port)
+                amount_
