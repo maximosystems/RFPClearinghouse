@@ -5,7 +5,6 @@ import io
 import csv
 import json
 import logging
-import requests
 import urllib.parse
 from datetime import datetime
 from dateutil import parser
@@ -67,7 +66,8 @@ class RFPDataIngestion:
                 "limit": 50
             }
             try:
-                response = requests.post(url, headers=headers, json=payload, timeout=12)
+                # We use tls_requests here too just to be safe
+                response = tls_requests.post(url, headers=headers, json=payload, impersonate="chrome", timeout=12)
                 if response.status_code == 200:
                     data = response.json()
                     bids = data.get('result', []) if isinstance(data, dict) else data
@@ -96,7 +96,7 @@ class RFPDataIngestion:
             url = f"https://api.procurement.opengov.com/api/v1/government/{portal}/project/public"
             payload = {"filters": [{"type": "status", "value": "active"}], "limit": 50, "page": 1}
             try:
-                response = requests.post(url, headers=headers, json=payload, timeout=10)
+                response = tls_requests.post(url, headers=headers, json=payload, impersonate="chrome", timeout=10)
                 if response.status_code == 200:
                     data = response.json()
                     projects = data.get('data', []) if isinstance(data, dict) else data
@@ -140,7 +140,7 @@ class DurmotIntelligence:
     def scrape_deep_text(self, url):
         if not url: return ""
         try:
-            res = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=5)
+            res = tls_requests.get(url, impersonate="chrome", timeout=5)
             if res.status_code == 200:
                 if url.lower().endswith('.pdf') or 'application/pdf' in res.headers.get('Content-Type', '').lower():
                     reader = PdfReader(io.BytesIO(res.content))
@@ -205,7 +205,7 @@ def live_sunbiz_scrape(vendor_keyword):
     search_url = f"https://search.sunbiz.org/Inquiry/CorporationSearch/SearchResults?inquiryType=EntityName&searchTerm={safe_keyword}"
     
     try:
-        # We are using tls_requests with impersonate="chrome" to bypass the Cloudflare wall
+        # We use tls_requests with impersonate="chrome" to bypass the Cloudflare wall
         res = tls_requests.get(search_url, impersonate="chrome", timeout=15)
         soup = BeautifulSoup(res.text, 'html.parser')
         
@@ -224,16 +224,26 @@ def live_sunbiz_scrape(vendor_keyword):
         detail_soup = BeautifulSoup(detail_res.text, 'html.parser')
         
         officers = []
+        # Bulletproof parser: Grab all text blocks, ignore HTML tags entirely
         for div in detail_soup.find_all('div', class_='detailSection'):
-            if 'Officer' in div.text or 'Authorized Person' in div.text or 'Registered Agent' in div.text:
-                for span in div.find_all('span'):
-                    text = span.text.strip()
-                    if text and text.isupper() and len(text.split()) >= 2:
-                        if text not in officers and not any(ignored in text for ignored in ['TITLE', 'NAME', 'ADDRESS', 'FL']):
-                            officers.append(text)
-                            
+            text_lines = div.get_text(separator='\n').split('\n')
+            section_header = text_lines[0].upper() if text_lines else ""
+            
+            # Look for ANY block related to leadership or agents (LLCs use Managers/Members)
+            if any(kw in section_header for kw in ['OFFICER', 'DIRECTOR', 'MANAGER', 'MEMBER', 'AUTHORIZED', 'AGENT']):
+                for line in text_lines:
+                    line = line.strip().upper()
+                    # Valid name: At least 2 words, no numbers (filters out addresses), no PO BOX
+                    if line and len(line.split()) >= 2 and not any(c.isdigit() for c in line) and "BOX" not in line:
+                        ignore_words = {'TITLE', 'NAME', 'ADDRESS', 'DETAIL', 'REGISTERED', 'AGENT', 'FLORIDA', 'LLC', 'INC'}
+                        line_words = set(re.sub(r'[^A-Z\s]', '', line).split())
+                        # If this line isn't just a label/header, it's a person's name
+                        if not line_words.intersection(ignore_words):
+                            if line not in officers:
+                                officers.append(line)
+                                
         if not officers:
-            officers = ["(Officers could not be parsed dynamically)"]
+            officers = ["(Officers could not be parsed dynamically - Check Sunbiz URL directly)"]
 
         return {
             "entity_name": entity_name,
@@ -271,7 +281,7 @@ def live_campaign_finance_query(officer_name):
     
     donations = []
     try:
-        res = requests.post(url, data=payload, headers=headers, timeout=15)
+        res = tls_requests.post(url, data=payload, headers=headers, impersonate="chrome", timeout=15)
         if res.status_code == 200:
             reader = csv.reader(io.StringIO(res.text))
             next(reader, None) # Skip the CSV header
