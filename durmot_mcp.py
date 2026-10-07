@@ -1,3 +1,4 @@
+Python
 import sys
 import os
 import re
@@ -175,4 +176,224 @@ class DurmotIntelligence:
         rfp['raw_metadata']['durmot_stack_matches'] = list(set(stack_matches)) 
         return rfp
 
-    def
+    def process_results(self, rfp_list):
+        unique_rfps = {item['url']: item for item in rfp_list}.values()
+        processed = []
+        for raw_rfp in unique_rfps:
+            rfp = self.score_and_flag(raw_rfp)
+            if not rfp: continue
+            safe_query = urllib.parse.quote_plus(f"{rfp['agency']} {rfp['title']} RFP")
+            processed.append({
+                "agency": rfp['agency'],
+                "title": rfp['title'],
+                "friction_score": rfp['friction_score'],
+                "friction_flags": rfp['friction_flags'],
+                "tech_stack_hits": rfp['raw_metadata'].get('durmot_stack_matches', []),
+                "url": f"https://www.google.com/search?q={safe_query}" 
+            })
+        processed.sort(key=lambda x: x['friction_score'])
+        return processed
+
+# ==============================================================================
+# SECTION 2: LIVE FORENSIC TRIAD (API & SCRAPING ENGINE)
+# ==============================================================================
+
+def live_sunbiz_scrape(vendor_keyword):
+    """Scrapes the live Florida Sunbiz directory, maintaining sessions to bypass Cloudflare."""
+    logging.info(f"Initiating live Sunbiz scrape for: {vendor_keyword}")
+    safe_keyword = urllib.parse.quote(vendor_keyword)
+    search_url = f"https://search.sunbiz.org/Inquiry/CorporationSearch/SearchResults?inquiryType=EntityName&searchTerm={safe_keyword}"
+    
+    headers = {
+        "Referer": "https://search.sunbiz.org/Inquiry/CorporationSearch/ByName",
+        "Accept-Language": "en-US,en;q=0.9"
+    }
+
+    try:
+        session = tls_requests.Session(impersonate="chrome120")
+        
+        res = session.get(search_url, headers=headers, timeout=15)
+        soup = BeautifulSoup(res.text, 'html.parser')
+        
+        detail_link = soup.find('a', href=re.compile(r'SearchResultDetail', re.IGNORECASE))
+        
+        if not detail_link:
+            page_title = soup.title.string.strip() if soup.title else "No Title"
+            logging.error(f"HTML Parse Failed. Sunbiz returned page title: {page_title}")
+            return {"status": f"No active corporate records found on Sunbiz matching '{vendor_keyword}'."}
+            
+        entity_name = detail_link.text.strip()
+        detail_url = f"https://search.sunbiz.org{detail_link['href']}"
+        
+        detail_res = session.get(detail_url, headers=headers, timeout=15)
+        detail_soup = BeautifulSoup(detail_res.text, 'html.parser')
+        
+        officers = []
+        for div in detail_soup.find_all('div', class_='detailSection'):
+            raw_text = div.get_text(separator='\n', strip=True).upper()
+            
+            if any(kw in raw_text for kw in ['OFFICER', 'DIRECTOR', 'MANAGER', 'MEMBER', 'AUTHORIZED', 'AGENT']):
+                for line in raw_text.split('\n'):
+                    line = line.strip()
+                    if line and len(line.split()) >= 2 and not any(c.isdigit() for c in line):
+                        ignore_words = {
+                            'TITLE', 'NAME', 'ADDRESS', 'DETAIL', 'REGISTERED', 'AGENT', 
+                            'FLORIDA', 'LLC', 'INC', 'ST', 'AVE', 'BLVD', 'RD', 'LN', 'WAY', 
+                            'CT', 'DR', 'STE', 'APT', 'DEPT', 'RM', 'STREET', 'AVENUE', 
+                            'BOULEVARD', 'ROAD', 'LANE', 'COURT', 'DRIVE', 'SUITE', 'ROOM', 
+                            'UNIT', 'PO', 'BOX', 'CORP', 'CORPORATION', 'COMPANY', 'MANAGEMENT', 
+                            'CITY', 'STATE', 'ZIP', 'CODE', 'VIEW', 'IMAGE', 'PDF', 'FORMAT',
+                            'PLLC', 'LAW', 'PA', 'FIRM', 'GROUP', 'HOLDINGS', 'TRUST'
+                        }
+                        line_words = set(re.sub(r'[^A-Z\s]', '', line).split())
+                        
+                        if not line_words.intersection(ignore_words):
+                            if line not in officers:
+                                officers.append(line)
+                                
+        if not officers:
+            officers = ["(Officers could not be parsed dynamically - Check Sunbiz URL)"]
+
+        return {
+            "entity_name": entity_name,
+            "sunbiz_url": detail_url,
+            "officers": officers[:5] 
+        }
+    except Exception as e:
+        logging.error(f"Sunbiz extraction failed: {e}")
+        return {"error": f"Live scraping failed: {str(e)}"}
+
+def live_campaign_finance_query(search_term, is_entity=False):
+    """Intercepts the live Division of Elections API to track political donations."""
+    logging.info(f"Querying Division of Elections for: {search_term}")
+    url = "https://dos.elections.myflorida.com/campaign-finance/contributions/"
+    headers = {
+        "Content-Type": "application/x-www-form-urlencoded"
+    }
+    
+    if is_entity:
+        first_name = ""
+        clean_name = re.sub(r'\b(INC\.|INC|LLC|CORP|CORPORATION|CO|LTD)\b', '', search_term, flags=re.IGNORECASE)
+        last_name = clean_name.replace(',', '').strip().split()[0]
+    else:
+        if ',' in search_term:
+            last_name = search_term.split(',')[0].strip()
+            first_name = search_term.split(',')[1].strip().split()[0]
+        else:
+            parts = search_term.split()
+            if len(parts) < 2: return []
+            first_name = parts[0]
+            last_name = parts[-1]
+
+    payload = {
+        "election_year": "All",
+        "search_type": "All",
+        "format": "csv",
+        "First_Name": first_name,
+        "Last_Name": last_name,
+        "submit": "Submit"
+    }
+    
+    donations = []
+    try:
+        res = tls_requests.post(url, data=payload, headers=headers, impersonate="chrome120", timeout=15)
+        if res.status_code == 200:
+            reader = csv.reader(io.StringIO(res.text))
+            next(reader, None) # Skip the CSV header
+            
+            for row in reader:
+                if len(row) < 10: continue
+                amount_str = row[1].replace('$', '').replace(',', '').strip()
+                amount = float(amount_str) if amount_str else 0.0
+                donations.append({
+                    "date": row[0].strip(),
+                    "amount": amount,
+                    "recipient_pac": row[9].strip(),
+                    "election_year": row[10].strip() if len(row) > 10 else "N/A"
+                })
+    except Exception as e:
+        logging.error(f"Elections API query failed for {search_term}: {e}")
+        pass
+    
+    donations.sort(key=lambda x: x['amount'], reverse=True)
+    return donations[:15]
+
+# ==============================================================================
+# SECTION 3: MCP EXPOSED TOOLS
+# ==============================================================================
+
+@mcp.tool
+def get_clean_leads() -> str:
+    """
+    Scrapes live municipal notices across Florida, applies the proprietary 
+    Friction Score to filter out rigged bids, and returns zero-friction Prime Leads.
+    """
+    pipeline = RFPDataIngestion()
+    pipeline.execute_pipeline()
+    intelligence = DurmotIntelligence()
+    results = intelligence.process_results(pipeline.rfp_master_list)
+    prime = [b for b in results if b['friction_score'] == 0]
+    return json.dumps(prime if prime else {"status": "No zero-friction Prime Leads found today."}, indent=2)
+
+@mcp.tool
+def run_friction_audit(agency_keyword: str) -> str:
+    """
+    Forensically audits active procurement notices for a specific agency keyword 
+    (e.g., 'Orlando', 'Citrus') to expose incumbent traps, sole-source flags, and lock-in language.
+    """
+    pipeline = RFPDataIngestion()
+    pipeline.execute_pipeline()
+    intelligence = DurmotIntelligence()
+    results = intelligence.process_results(pipeline.rfp_master_list)
+    filtered = [b for b in results if agency_keyword.lower() in b['agency'].lower()]
+    return json.dumps(filtered if filtered else {"status": f"No active bids found matching '{agency_keyword}'."}, indent=2)
+
+@mcp.tool
+def audit_vendor_pay_to_play(vendor_keyword: str) -> str:
+    """
+    Forensic Triad Tool (Lightweight): Cross-references live Florida Sunbiz ownership records 
+    against live state PAC/campaign finance contributions to detect pay-to-play anomalies.
+    Requires no database.
+    """
+    sunbiz_data = live_sunbiz_scrape(vendor_keyword)
+    
+    if "status" in sunbiz_data or "error" in sunbiz_data:
+        return json.dumps([sunbiz_data], indent=2)
+    
+    entity_name = sunbiz_data["entity_name"]
+    officers = sunbiz_data["officers"]
+    
+    report = {
+        "vendor_keyword_searched": vendor_keyword,
+        "entity_found": entity_name,
+        "sunbiz_source_url": sunbiz_data["sunbiz_url"],
+        "officers_investigated": officers,
+        "political_donations_found": []
+    }
+    
+    # 1. Investigate the Corporate Entity Itself
+    entity_donations = live_campaign_finance_query(entity_name, is_entity=True)
+    if entity_donations:
+        report["political_donations_found"].append({
+            "target": f"{entity_name} (Corporate Account)",
+            "total_contributions_found": len(entity_donations),
+            "top_donations": entity_donations
+        })
+    
+    # 2. Investigate the Human Officers
+    for officer in officers:
+        if "(Officers" in officer: continue
+        donations = live_campaign_finance_query(officer, is_entity=False)
+        if donations:
+            report["political_donations_found"].append({
+                "target": officer,
+                "total_contributions_found": len(donations),
+                "top_donations": donations
+            })
+            
+    return json.dumps([report], indent=2)
+
+if __name__ == "__main__":
+    # Expose the server using Server-Sent Events (SSE) so clients can connect over the internet via Railway.
+    port = int(os.environ.get("PORT", 8000))
+    mcp.run(transport='sse', host='0.0.0.0', port=port)
