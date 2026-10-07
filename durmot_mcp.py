@@ -307,4 +307,88 @@ def live_campaign_finance_query(officer_name):
             
             for row in reader:
                 if len(row) < 10: continue
-                amount_
+                amount_str = row[1].replace('$', '').replace(',', '').strip()
+                amount = float(amount_str) if amount_str else 0.0
+                donations.append({
+                    "date": row[0].strip(),
+                    "amount": amount,
+                    "recipient_pac": row[9].strip(),
+                    "election_year": row[10].strip() if len(row) > 10 else "N/A"
+                })
+    except Exception as e:
+        logging.error(f"Elections API query failed for {officer_name}: {e}")
+        pass
+    
+    # Sort by largest donations and return the top 15
+    donations.sort(key=lambda x: x['amount'], reverse=True)
+    return donations[:15]
+
+# ==============================================================================
+# SECTION 3: MCP EXPOSED TOOLS
+# ==============================================================================
+
+@mcp.tool
+def get_clean_leads() -> str:
+    """
+    Scrapes live municipal notices across Florida, applies the proprietary 
+    Friction Score to filter out rigged bids, and returns zero-friction Prime Leads.
+    """
+    pipeline = RFPDataIngestion()
+    pipeline.execute_pipeline()
+    intelligence = DurmotIntelligence()
+    results = intelligence.process_results(pipeline.rfp_master_list)
+    prime = [b for b in results if b['friction_score'] == 0]
+    return json.dumps(prime if prime else {"status": "No zero-friction Prime Leads found today."}, indent=2)
+
+@mcp.tool
+def run_friction_audit(agency_keyword: str) -> str:
+    """
+    Forensically audits active procurement notices for a specific agency keyword 
+    (e.g., 'Orlando', 'Citrus') to expose incumbent traps, sole-source flags, and lock-in language.
+    """
+    pipeline = RFPDataIngestion()
+    pipeline.execute_pipeline()
+    intelligence = DurmotIntelligence()
+    results = intelligence.process_results(pipeline.rfp_master_list)
+    filtered = [b for b in results if agency_keyword.lower() in b['agency'].lower()]
+    return json.dumps(filtered if filtered else {"status": f"No active bids found matching '{agency_keyword}'."}, indent=2)
+
+@mcp.tool
+def audit_vendor_pay_to_play(vendor_keyword: str) -> str:
+    """
+    Forensic Triad Tool (Lightweight): Cross-references live Florida Sunbiz ownership records 
+    against live state PAC/campaign finance contributions to detect pay-to-play anomalies.
+    Requires no database.
+    """
+    sunbiz_data = live_sunbiz_scrape(vendor_keyword)
+    
+    if "status" in sunbiz_data or "error" in sunbiz_data:
+        return json.dumps([sunbiz_data], indent=2)
+    
+    entity_name = sunbiz_data["entity_name"]
+    officers = sunbiz_data["officers"]
+    
+    report = {
+        "vendor_keyword_searched": vendor_keyword,
+        "entity_found": entity_name,
+        "sunbiz_source_url": sunbiz_data["sunbiz_url"],
+        "officers_investigated": officers,
+        "political_donations_found": []
+    }
+    
+    for officer in officers:
+        if "(Officers" in officer: continue
+        donations = live_campaign_finance_query(officer)
+        if donations:
+            report["political_donations_found"].append({
+                "officer": officer,
+                "total_contributions_found": len(donations),
+                "top_donations": donations
+            })
+            
+    return json.dumps([report], indent=2)
+
+if __name__ == "__main__":
+    # Expose the server using Server-Sent Events (SSE) so clients can connect over the internet via Railway.
+    port = int(os.environ.get("PORT", 8000))
+    mcp.run(transport='sse', host='0.0.0.0', port=port)
