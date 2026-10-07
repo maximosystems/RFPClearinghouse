@@ -78,11 +78,12 @@ class ForensicDataIngestion:
                 transport.close()
                 return
             
-            logging.info(f"Target locked: {target_file}. Downloading master archive to container...")
+            logging.info(f"Target locked: {target_file}. Bypassing state server limits with prefetch=False...")
             local_zip = f'/app/{target_file}'
             
-            # Download the zip file to the Railway container's ephemeral disk
-            sftp.get(target_file, local_zip)
+            # CRITICAL FIX: The state's server cannot handle paramiko's default concurrent read-ahead requests.
+            # Disabling prefetch forces a stable, sequential download.
+            sftp.get(target_file, local_zip, prefetch=False)
             
             conn = self.get_connection()
             cursor = conn.cursor()
@@ -95,7 +96,7 @@ class ForensicDataIngestion:
             
             batch_data = []
             
-            # Extract and parse the split text files directly from the ZIP
+            # Extract and parse the split text files directly from the local ZIP
             with zipfile.ZipFile(local_zip, 'r') as z:
                 txt_files = [f for f in z.namelist() if f.endswith('.txt')]
                 for txt_file in txt_files:
@@ -127,7 +128,7 @@ class ForensicDataIngestion:
             sftp.close()
             transport.close()
             
-            # Clean up the zip file to free up Railway server space
+            # Clean up the zip file
             if os.path.exists(local_zip):
                 os.remove(local_zip)
                 
