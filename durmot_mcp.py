@@ -11,6 +11,7 @@ from datetime import datetime
 from dateutil import parser
 from bs4 import BeautifulSoup
 from pypdf import PdfReader
+from curl_cffi import requests as tls_requests
 
 # FastMCP SDK
 from fastmcp import FastMCP
@@ -197,26 +198,17 @@ class DurmotIntelligence:
 # ==============================================================================
 
 def live_sunbiz_scrape(vendor_keyword):
-    """Scrapes the live Florida Sunbiz directory to pierce the corporate veil on-demand."""
+    """Scrapes the live Florida Sunbiz directory, bypassing Cloudflare."""
     logging.info(f"Initiating live Sunbiz scrape for: {vendor_keyword}")
     safe_keyword = urllib.parse.quote(vendor_keyword)
     
-    # Using the more stable query parameter URL structure
     search_url = f"https://search.sunbiz.org/Inquiry/CorporationSearch/SearchResults?inquiryType=EntityName&searchTerm={safe_keyword}"
     
-    # Fortified headers to bypass basic bot protection
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.5",
-        "Connection": "keep-alive"
-    }
-    
     try:
-        res = requests.get(search_url, headers=headers, timeout=10)
+        # We are using tls_requests with impersonate="chrome" to bypass the Cloudflare wall
+        res = tls_requests.get(search_url, impersonate="chrome", timeout=15)
         soup = BeautifulSoup(res.text, 'html.parser')
         
-        # Bulletproof target: Find the very first link containing 'SearchResultDetail'
         detail_link = soup.find('a', href=re.compile(r'SearchResultDetail', re.IGNORECASE))
         
         if not detail_link:
@@ -228,16 +220,14 @@ def live_sunbiz_scrape(vendor_keyword):
         detail_url = f"https://search.sunbiz.org{detail_link['href']}"
         
         # Follow the link into the specific entity's filing page
-        detail_res = requests.get(detail_url, headers=headers, timeout=10)
+        detail_res = tls_requests.get(detail_url, impersonate="chrome", timeout=15)
         detail_soup = BeautifulSoup(detail_res.text, 'html.parser')
         
         officers = []
-        # Extract Officers, Directors, and Registered Agents
         for div in detail_soup.find_all('div', class_='detailSection'):
             if 'Officer' in div.text or 'Authorized Person' in div.text or 'Registered Agent' in div.text:
                 for span in div.find_all('span'):
                     text = span.text.strip()
-                    # Filter out addresses and titles, keeping only the capitalized names
                     if text and text.isupper() and len(text.split()) >= 2:
                         if text not in officers and not any(ignored in text for ignored in ['TITLE', 'NAME', 'ADDRESS', 'FL']):
                             officers.append(text)
