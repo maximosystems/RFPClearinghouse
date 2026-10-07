@@ -5,6 +5,7 @@ import io
 import csv
 import json
 import logging
+import random
 import urllib.parse
 from datetime import datetime
 from dateutil import parser
@@ -66,8 +67,7 @@ class RFPDataIngestion:
                 "limit": 50
             }
             try:
-                # We use tls_requests here too just to be safe
-                response = tls_requests.post(url, headers=headers, json=payload, impersonate="chrome", timeout=12)
+                response = tls_requests.post(url, headers=headers, json=payload, impersonate="chrome116", timeout=12)
                 if response.status_code == 200:
                     data = response.json()
                     bids = data.get('result', []) if isinstance(data, dict) else data
@@ -96,7 +96,7 @@ class RFPDataIngestion:
             url = f"https://api.procurement.opengov.com/api/v1/government/{portal}/project/public"
             payload = {"filters": [{"type": "status", "value": "active"}], "limit": 50, "page": 1}
             try:
-                response = tls_requests.post(url, headers=headers, json=payload, impersonate="chrome", timeout=10)
+                response = tls_requests.post(url, headers=headers, json=payload, impersonate="chrome116", timeout=10)
                 if response.status_code == 200:
                     data = response.json()
                     projects = data.get('data', []) if isinstance(data, dict) else data
@@ -140,7 +140,7 @@ class DurmotIntelligence:
     def scrape_deep_text(self, url):
         if not url: return ""
         try:
-            res = tls_requests.get(url, impersonate="chrome", timeout=5)
+            res = tls_requests.get(url, impersonate="chrome116", timeout=5)
             if res.status_code == 200:
                 if url.lower().endswith('.pdf') or 'application/pdf' in res.headers.get('Content-Type', '').lower():
                     reader = PdfReader(io.BytesIO(res.content))
@@ -198,29 +198,38 @@ class DurmotIntelligence:
 # ==============================================================================
 
 def live_sunbiz_scrape(vendor_keyword):
-    """Scrapes the live Florida Sunbiz directory, bypassing Cloudflare."""
+    """Scrapes the live Florida Sunbiz directory, maintaining sessions to bypass Cloudflare."""
     logging.info(f"Initiating live Sunbiz scrape for: {vendor_keyword}")
     safe_keyword = urllib.parse.quote(vendor_keyword)
-    
     search_url = f"https://search.sunbiz.org/Inquiry/CorporationSearch/SearchResults?inquiryType=EntityName&searchTerm={safe_keyword}"
     
     try:
-        # We use tls_requests with impersonate="chrome" to bypass the Cloudflare wall
-        res = tls_requests.get(search_url, impersonate="chrome", timeout=15)
+        # Rotate browser fingerprints to avoid static detection
+        browsers = ["chrome116", "chrome110", "edge101", "safari15_5"]
+        fp = random.choice(browsers)
+        
+        # Open a persistent session to hold the Cloudflare clearance cookie
+        session = tls_requests.Session(impersonate=fp)
+        
+        # WARMUP: Quietly ping the root domain to get cleared by Cloudflare first
+        session.get("https://search.sunbiz.org/", timeout=10)
+        
+        # EXECUTE: Run the actual search using the cleared session
+        res = session.get(search_url, timeout=15)
         soup = BeautifulSoup(res.text, 'html.parser')
         
         detail_link = soup.find('a', href=re.compile(r'SearchResultDetail', re.IGNORECASE))
         
         if not detail_link:
             page_title = soup.title.string.strip() if soup.title else "No Title"
-            logging.error(f"HTML Parse Failed. Sunbiz returned page title: {page_title}")
+            logging.error(f"HTML Parse Failed. Sunbiz returned page title: {page_title} (Fingerprint: {fp})")
             return {"status": f"No active corporate records found on Sunbiz matching '{vendor_keyword}'."}
             
         entity_name = detail_link.text.strip()
         detail_url = f"https://search.sunbiz.org{detail_link['href']}"
         
         # Follow the link into the specific entity's filing page
-        detail_res = tls_requests.get(detail_url, impersonate="chrome", timeout=15)
+        detail_res = session.get(detail_url, timeout=15)
         detail_soup = BeautifulSoup(detail_res.text, 'html.parser')
         
         officers = []
@@ -259,7 +268,6 @@ def live_campaign_finance_query(officer_name):
     logging.info(f"Querying Division of Elections for officer: {officer_name}")
     url = "https://dos.elections.myflorida.com/campaign-finance/contributions/"
     headers = {
-        "User-Agent": "Mozilla/5.0",
         "Content-Type": "application/x-www-form-urlencoded"
     }
     
@@ -281,7 +289,8 @@ def live_campaign_finance_query(officer_name):
     
     donations = []
     try:
-        res = tls_requests.post(url, data=payload, headers=headers, impersonate="chrome", timeout=15)
+        session = tls_requests.Session(impersonate="chrome116")
+        res = session.post(url, data=payload, headers=headers, timeout=15)
         if res.status_code == 200:
             reader = csv.reader(io.StringIO(res.text))
             next(reader, None) # Skip the CSV header
