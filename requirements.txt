@@ -6,3 +6,4 @@ Flask
 pypdf
 fonttools
 gunicorn
+fastmcp
