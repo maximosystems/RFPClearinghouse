@@ -249,30 +249,39 @@ def query_opensecrets_api(vendor_name):
 
 def query_municipal_checkbook(agency_name, vendor_name):
     """
-    OSINT checkbook scanner. Bypasses the need for 400 different city API endpoints 
-    by querying indexed municipal records, council minutes, and PDF agendas for the 
-    vendor name cross-referenced with 'Change Order' or 'Amendment'.
+    OSINT checkbook scanner via SerpApi. Queries Google's index for 
+    the vendor name cross-referenced with 'Change Order' or 'Amendment'.
     """
-    logging.info(f"Scanning open checkbooks and council minutes for: {vendor_name} at {agency_name}")
+    logging.info(f"Scanning open checkbooks via SerpApi for: {vendor_name} at {agency_name}")
+    api_key = os.environ.get("SERPAPI_KEY")
     
-    # Construct a highly targeted dork query
-    safe_query = urllib.parse.quote_plus(f'"{vendor_name}" "{agency_name}" "change order" OR "amendment" OR "contingency" OR "increase"')
-    search_url = f"https://html.duckduckgo.com/html/?q={safe_query}"
-    
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    }
+    if not api_key:
+        return {"error": "SERPAPI_KEY is missing from environment variables. Please add it to your Railway config."}
+
+    # Highly targeted Google dork
+    query = f'"{vendor_name}" "{agency_name}" "change order" OR "amendment" OR "contingency" OR "increase"'
+    url = f"https://serpapi.com/search.json?engine=google&q={urllib.parse.quote_plus(query)}&api_key={api_key}"
     
     try:
-        res = tls_requests.get(search_url, headers=headers, impersonate="chrome120", timeout=15)
-        soup = BeautifulSoup(res.text, 'html.parser')
+        res = tls_requests.get(url, timeout=15)
+        
+        if res.status_code != 200:
+            return {"error": f"SerpApi returned status {res.status_code}: {res.text}"}
+             
+        data = res.json()
         
         results = []
-        for a in soup.find_all('a', class_='result__snippet'):
-            snippet = a.text.strip()
+        organic_results = data.get("organic_results", [])
+        
+        for item in organic_results:
+            snippet = item.get("snippet", "")
             # Verify the snippet actually contains evidence of our trap
             if vendor_name.lower() in snippet.lower() and any(kw in snippet.lower() for kw in ['change order', 'amend', 'increase']):
-                results.append(snippet)
+                results.append({
+                    "title": item.get("title", "Unknown Document"),
+                    "link": item.get("link", ""),
+                    "snippet": snippet
+                })
                 
         if not results:
             return {"status": f"No public change orders or budget increases found for {vendor_name} at {agency_name}."}
@@ -287,8 +296,8 @@ def query_municipal_checkbook(agency_name, vendor_name):
             "public_record_evidence": results[:5]
         }
     except Exception as e:
-        logging.error(f"Checkbook OSINT query failed: {e}")
-        return {"error": f"OSINT search failed: {str(e)}"}
+        logging.error(f"Checkbook API query failed: {e}")
+        return {"error": f"Search API failed: {str(e)}"}
 
 
 # ==============================================================================
