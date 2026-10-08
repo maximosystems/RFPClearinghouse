@@ -2,13 +2,9 @@ import sys
 import os
 import re
 import io
-import csv
 import json
 import logging
-import random
 import urllib.parse
-from datetime import datetime
-from dateutil import parser
 from bs4 import BeautifulSoup
 from pypdf import PdfReader
 from curl_cffi import requests as tls_requests
@@ -193,129 +189,107 @@ class DurmotIntelligence:
         processed.sort(key=lambda x: x['friction_score'])
         return processed
 
+
 # ==============================================================================
-# SECTION 2: LIVE FORENSIC TRIAD (API & SCRAPING ENGINE)
+# SECTION 2: FORENSIC TRIAD (OPENSECRETS & OPEN DATA OSINT)
 # ==============================================================================
 
-def live_sunbiz_scrape(vendor_keyword):
-    """Scrapes the live Florida Sunbiz directory, maintaining sessions to bypass Cloudflare."""
-    logging.info(f"Initiating live Sunbiz scrape for: {vendor_keyword}")
-    safe_keyword = urllib.parse.quote(vendor_keyword)
-    search_url = f"https://search.sunbiz.org/Inquiry/CorporationSearch/SearchResults?inquiryType=EntityName&searchTerm={safe_keyword}"
-    
-    headers = {
-        "Referer": "https://search.sunbiz.org/Inquiry/CorporationSearch/ByName",
-        "Accept-Language": "en-US,en;q=0.9"
-    }
+def query_opensecrets_api(vendor_name):
+    """Hits the OpenSecrets REST API to find PAC and lobbying totals."""
+    api_key = os.environ.get("OPENSECRETS_API_KEY")
+    if not api_key:
+        return {"error": "OPENSECRETS_API_KEY environment variable is not set. Please add it to your Railway config."}
 
+    logging.info(f"Querying OpenSecrets API for: {vendor_name}")
     try:
-        session = tls_requests.Session(impersonate="chrome120")
+        # Step 1: Find the Organization ID
+        org_search_url = f"http://www.opensecrets.org/api/?method=getOrgs&org={urllib.parse.quote(vendor_name)}&apikey={api_key}&output=json"
+        res = tls_requests.get(org_search_url, timeout=10)
         
-        res = session.get(search_url, headers=headers, timeout=15)
-        soup = BeautifulSoup(res.text, 'html.parser')
-        
-        detail_link = soup.find('a', href=re.compile(r'SearchResultDetail', re.IGNORECASE))
-        
-        if not detail_link:
-            page_title = soup.title.string.strip() if soup.title else "No Title"
-            logging.error(f"HTML Parse Failed. Sunbiz returned page title: {page_title}")
-            return {"status": f"No active corporate records found on Sunbiz matching '{vendor_keyword}'."}
+        if res.status_code != 200:
+            return {"error": f"OpenSecrets API returned status {res.status_code}"}
             
-        entity_name = detail_link.text.strip()
-        detail_url = f"https://search.sunbiz.org{detail_link['href']}"
+        data = res.json()
+        orgs = data.get('response', {}).get('organization', [])
         
-        detail_res = session.get(detail_url, headers=headers, timeout=15)
-        detail_soup = BeautifulSoup(detail_res.text, 'html.parser')
-        
-        officers = []
-        for div in detail_soup.find_all('div', class_='detailSection'):
-            raw_text = div.get_text(separator='\n', strip=True).upper()
-            
-            if any(kw in raw_text for kw in ['OFFICER', 'DIRECTOR', 'MANAGER', 'MEMBER', 'AUTHORIZED', 'AGENT']):
-                for line in raw_text.split('\n'):
-                    line = line.strip()
-                    if line and len(line.split()) >= 2 and not any(c.isdigit() for c in line):
-                        ignore_words = {
-                            'TITLE', 'NAME', 'ADDRESS', 'DETAIL', 'REGISTERED', 'AGENT', 
-                            'FLORIDA', 'LLC', 'INC', 'ST', 'AVE', 'BLVD', 'RD', 'LN', 'WAY', 
-                            'CT', 'DR', 'STE', 'APT', 'DEPT', 'RM', 'STREET', 'AVENUE', 
-                            'BOULEVARD', 'ROAD', 'LANE', 'COURT', 'DRIVE', 'SUITE', 'ROOM', 
-                            'UNIT', 'PO', 'BOX', 'CORP', 'CORPORATION', 'COMPANY', 'MANAGEMENT', 
-                            'CITY', 'STATE', 'ZIP', 'CODE', 'VIEW', 'IMAGE', 'PDF', 'FORMAT',
-                            'PLLC', 'LAW', 'PA', 'FIRM', 'GROUP', 'HOLDINGS', 'TRUST'
-                        }
-                        line_words = set(re.sub(r'[^A-Z\s]', '', line).split())
-                        
-                        if not line_words.intersection(ignore_words):
-                            if line not in officers:
-                                officers.append(line)
-                                
-        if not officers:
-            officers = ["(Officers could not be parsed dynamically - Check Sunbiz URL)"]
+        if not orgs:
+            return {"status": f"No OpenSecrets profile found for '{vendor_name}'."}
+
+        # OpenSecrets returns a dict if there's only 1 match, or a list for multiple matches
+        if isinstance(orgs, dict):
+            orgs = [orgs]
+
+        top_org = orgs[0].get('@attributes', {})
+        org_id = top_org.get('orgid')
+        org_name = top_org.get('orgname')
+
+        if not org_id:
+            return {"error": "Failed to extract Organization ID from OpenSecrets."}
+
+        # Step 2: Retrieve the Organization Summary using the ID
+        summary_url = f"http://www.opensecrets.org/api/?method=orgSummary&id={org_id}&apikey={api_key}&output=json"
+        sum_res = tls_requests.get(summary_url, timeout=10)
+        sum_data = sum_res.json()
+        summary = sum_data.get('response', {}).get('organization', {}).get('@attributes', {})
 
         return {
-            "entity_name": entity_name,
-            "sunbiz_url": detail_url,
-            "officers": officers[:5] 
+            "vendor_searched": vendor_name,
+            "opensecrets_entity_name": org_name,
+            "financial_totals": {
+                "total_pac_contributions": f"${summary.get('pac', '0')}",
+                "total_individual_contributions": f"${summary.get('indivs', '0')}",
+                "total_soft_money": f"${summary.get('soft', '0')}",
+                "total_receipts": f"${summary.get('total', '0')}"
+            },
+            "source_url": f"https://www.opensecrets.org/orgs/summary?id={org_id}"
         }
     except Exception as e:
-        logging.error(f"Sunbiz extraction failed: {e}")
-        return {"error": f"Live scraping failed: {str(e)}"}
+        logging.error(f"OpenSecrets query failed: {e}")
+        return {"error": f"API request failed: {str(e)}"}
 
-def live_campaign_finance_query(search_term, is_entity=False):
-    """Intercepts the live Division of Elections API to track political donations."""
-    logging.info(f"Querying Division of Elections for: {search_term}")
-    url = "https://dos.elections.myflorida.com/campaign-finance/contributions/"
+def query_municipal_checkbook(agency_name, vendor_name):
+    """
+    OSINT checkbook scanner. Bypasses the need for 400 different city API endpoints 
+    by querying indexed municipal records, council minutes, and PDF agendas for the 
+    vendor name cross-referenced with 'Change Order' or 'Amendment'.
+    """
+    logging.info(f"Scanning open checkbooks and council minutes for: {vendor_name} at {agency_name}")
+    
+    # Construct a highly targeted dork query
+    safe_query = urllib.parse.quote_plus(f'"{vendor_name}" "{agency_name}" "change order" OR "amendment" OR "contingency" OR "increase"')
+    search_url = f"https://html.duckduckgo.com/html/?q={safe_query}"
+    
     headers = {
-        "Content-Type": "application/x-www-form-urlencoded"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     }
     
-    if is_entity:
-        first_name = ""
-        clean_name = re.sub(r'\b(INC\.|INC|LLC|CORP|CORPORATION|CO|LTD)\b', '', search_term, flags=re.IGNORECASE)
-        last_name = clean_name.replace(',', '').strip().split()[0]
-    else:
-        if ',' in search_term:
-            last_name = search_term.split(',')[0].strip()
-            first_name = search_term.split(',')[1].strip().split()[0]
-        else:
-            parts = search_term.split()
-            if len(parts) < 2: return []
-            first_name = parts[0]
-            last_name = parts[-1]
-
-    payload = {
-        "election_year": "All",
-        "search_type": "All",
-        "format": "csv",
-        "First_Name": first_name,
-        "Last_Name": last_name,
-        "submit": "Submit"
-    }
-    
-    donations = []
     try:
-        res = tls_requests.post(url, data=payload, headers=headers, impersonate="chrome120", timeout=15)
-        if res.status_code == 200:
-            reader = csv.reader(io.StringIO(res.text))
-            next(reader, None) # Skip the CSV header
+        res = tls_requests.get(search_url, headers=headers, impersonate="chrome120", timeout=15)
+        soup = BeautifulSoup(res.text, 'html.parser')
+        
+        results = []
+        for a in soup.find_all('a', class_='result__snippet'):
+            snippet = a.text.strip()
+            # Verify the snippet actually contains evidence of our trap
+            if vendor_name.lower() in snippet.lower() and any(kw in snippet.lower() for kw in ['change order', 'amend', 'increase']):
+                results.append(snippet)
+                
+        if not results:
+            return {"status": f"No public change orders or budget increases found for {vendor_name} at {agency_name}."}
             
-            for row in reader:
-                if len(row) < 10: continue
-                amount_str = row[1].replace('$', '').replace(',', '').strip()
-                amount = float(amount_str) if amount_str else 0.0
-                donations.append({
-                    "date": row[0].strip(),
-                    "amount": amount,
-                    "recipient_pac": row[9].strip(),
-                    "election_year": row[10].strip() if len(row) > 10 else "N/A"
-                })
+        # If we find 2 or more indexed change orders in the top results, it's a massive red flag.
+        risk_flag = "HIGH (Multiple historical budget expansions detected)" if len(results) >= 2 else "MODERATE"
+        
+        return {
+            "agency_investigated": agency_name,
+            "vendor_investigated": vendor_name,
+            "bleed_ratio_risk": risk_flag,
+            "public_record_evidence": results[:5]
+        }
     except Exception as e:
-        logging.error(f"Elections API query failed for {search_term}: {e}")
-        pass
-    
-    donations.sort(key=lambda x: x['amount'], reverse=True)
-    return donations[:15]
+        logging.error(f"Checkbook OSINT query failed: {e}")
+        return {"error": f"OSINT search failed: {str(e)}"}
+
 
 # ==============================================================================
 # SECTION 3: MCP EXPOSED TOOLS
@@ -348,48 +322,21 @@ def run_friction_audit(agency_keyword: str) -> str:
     return json.dumps(filtered if filtered else {"status": f"No active bids found matching '{agency_keyword}'."}, indent=2)
 
 @mcp.tool
-def audit_vendor_pay_to_play(vendor_keyword: str) -> str:
+def audit_vendor_lobbying(vendor_name: str) -> str:
     """
-    Forensic Triad Tool (Lightweight): Cross-references live Florida Sunbiz ownership records 
-    against live state PAC/campaign finance contributions to detect pay-to-play anomalies.
-    Requires no database.
+    Forensic Tool: Queries the OpenSecrets API to reveal a vendor's federal and state PAC 
+    contributions, soft money, and lobbying expenditures to detect influence peddling.
     """
-    sunbiz_data = live_sunbiz_scrape(vendor_keyword)
-    
-    if "status" in sunbiz_data or "error" in sunbiz_data:
-        return json.dumps([sunbiz_data], indent=2)
-    
-    entity_name = sunbiz_data["entity_name"]
-    officers = sunbiz_data["officers"]
-    
-    report = {
-        "vendor_keyword_searched": vendor_keyword,
-        "entity_found": entity_name,
-        "sunbiz_source_url": sunbiz_data["sunbiz_url"],
-        "officers_investigated": officers,
-        "political_donations_found": []
-    }
-    
-    # 1. Investigate the Corporate Entity Itself
-    entity_donations = live_campaign_finance_query(entity_name, is_entity=True)
-    if entity_donations:
-        report["political_donations_found"].append({
-            "target": f"{entity_name} (Corporate Account)",
-            "total_contributions_found": len(entity_donations),
-            "top_donations": entity_donations
-        })
-    
-    # 2. Investigate the Human Officers
-    for officer in officers:
-        if "(Officers" in officer: continue
-        donations = live_campaign_finance_query(officer, is_entity=False)
-        if donations:
-            report["political_donations_found"].append({
-                "target": officer,
-                "total_contributions_found": len(donations),
-                "top_donations": donations
-            })
-            
+    report = query_opensecrets_api(vendor_name)
+    return json.dumps([report], indent=2)
+
+@mcp.tool
+def audit_vendor_checkbook(agency_name: str, vendor_name: str) -> str:
+    """
+    Forensic Tool: Searches public municipal records, city council minutes, and transparency 
+    portals to detect the 'Low-Bid / High-Change-Order' trap for a specific vendor at a specific agency.
+    """
+    report = query_municipal_checkbook(agency_name, vendor_name)
     return json.dumps([report], indent=2)
 
 if __name__ == "__main__":
