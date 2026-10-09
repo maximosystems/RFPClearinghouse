@@ -502,4 +502,42 @@ def serve_dashboard():
                 const days = encodeURIComponent(document.getElementById('sweepDays').value);
                 
                 const ds = document.getElementById('t_ds').checked;
-                const
+                const cb = document.getElementById('t_cb').checked;
+                const vl = document.getElementById('t_vl').checked;
+                const og = document.getElementById('t_og').checked;
+                const pdf = document.getElementById('t_pdf').checked;
+
+                try {
+                    const response = await fetch(`/api/sweep?keyword=${kw}&type=${type}&state=${state}&days=${days}&ds=${ds}&cb=${cb}&vl=${vl}&og=${og}&pdf=${pdf}`);
+                    document.getElementById('output').innerText = JSON.stringify(await response.json(), null, 2);
+                } catch (err) { document.getElementById('output').innerText = 'Error: ' + err; }
+                document.getElementById('sweepStatus').style.display = 'none';
+            }
+
+            async function runCheckbook() {
+                document.getElementById('cbStatus').style.display = 'block';
+                document.getElementById('output').innerText = 'Initializing SerpApi OSINT Protocol...';
+                try {
+                    const response = await fetch('/api/checkbook?agency=' + encodeURIComponent(document.getElementById('cbAgency').value) + '&vendor=' + encodeURIComponent(document.getElementById('cbVendor').value));
+                    document.getElementById('output').innerText = JSON.stringify(await response.json(), null, 2);
+                } catch (err) { document.getElementById('output').innerText = 'Error: ' + err; }
+                document.getElementById('cbStatus').style.display = 'none';
+            }
+
+            async function runOpenSecrets() {
+                document.getElementById('osStatus').style.display = 'block';
+                document.getElementById('output').innerText = 'Accessing OpenSecrets Disclosure Database...';
+                try {
+                    const response = await fetch('/api/opensecrets?vendor=' + encodeURIComponent(document.getElementById('osVendor').value));
+                    document.getElementById('output').innerText = JSON.stringify(await response.json(), null, 2);
+                } catch (err) { document.getElementById('output').innerText = 'Error: ' + err; }
+                document.getElementById('osStatus').style.display = 'none';
+            }
+        </script>
+    </body>
+    </html>
+    """
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run(app, host="0.0.0.0", port=port)
