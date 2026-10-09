@@ -5,6 +5,7 @@ import io
 import json
 import logging
 import urllib.parse
+from datetime import datetime, timedelta
 from bs4 import BeautifulSoup
 from pypdf import PdfReader
 from curl_cffi import requests as tls_requests
@@ -128,7 +129,6 @@ class RFPDataIngestion:
         for portal in national_portals:
             try:
                 url = f"https://api.procurement.opengov.com/api/v1/government/{portal}/project/public"
-                # Removed the 'active' filter to pull the 100 most recent bids (active and awarded/closed)
                 payload = {"limit": 100, "page": 1}
                 response = tls_requests.post(url, headers=headers, json=payload, impersonate="chrome120", timeout=5)
                 if response.status_code == 200:
@@ -179,10 +179,33 @@ class DurmotIntelligence:
         except Exception: pass
         return ""
 
-    def process_results(self, rfp_list):
+    def process_results(self, rfp_list, days=0):
         unique_rfps = {item['url']: item for item in rfp_list}.values()
         processed = []
+        
+        cutoff_date = datetime.now() - timedelta(days=days) if days > 0 else None
+
         for raw_rfp in unique_rfps:
+            # Handle Datetime Filtering
+            if cutoff_date and raw_rfp.get('published_date'):
+                date_str = str(raw_rfp['published_date'])
+                pub_date = None
+                
+                # Check for ISO Format (YYYY-MM-DD)
+                match_iso = re.search(r'(\d{4}-\d{2}-\d{2})', date_str)
+                # Check for US Format (MM/DD/YYYY)
+                match_us = re.search(r'(\d{1,2})[-/](\d{1,2})[-/](\d{4})', date_str)
+                
+                if match_iso:
+                    try: pub_date = datetime.strptime(match_iso.group(1), "%Y-%m-%d")
+                    except: pass
+                elif match_us:
+                    try: pub_date = datetime.strptime(f"{match_us.group(3)}-{match_us.group(1).zfill(2)}-{match_us.group(2).zfill(2)}", "%Y-%m-%d")
+                    except: pass
+                    
+                if pub_date and pub_date < cutoff_date:
+                    continue # Skip bids older than the requested timeframe
+
             base_text = f"{raw_rfp['title']} {raw_rfp['agency']} {json.dumps(raw_rfp['raw_metadata'])}".lower()
             
             # Use dynamic industry stack
@@ -200,11 +223,13 @@ class DurmotIntelligence:
 
             processed.append({
                 "agency": raw_rfp['agency'], "state": raw_rfp.get('state', 'US'),
-                "title": raw_rfp['title'], "source": raw_rfp.get('source', 'Unknown'),
+                "title": raw_rfp['title'], "published_date": raw_rfp.get('published_date', 'Unknown'),
+                "source": raw_rfp.get('source', 'Unknown'),
                 "friction_score": min(friction_score, 100), "friction_flags": flags,
                 "suspected_incumbent": suspected[0] if suspected else None,
                 "url": raw_rfp.get('url', 'No URL provided') 
             })
+            
         processed.sort(key=lambda x: x['friction_score'], reverse=True)
         return processed
 
@@ -266,17 +291,17 @@ def query_opensecrets_api(vendor_name):
 # ==============================================================================
 
 @mcp.tool
-def get_all_nationwide_rfps() -> str:
+def get_all_nationwide_rfps(days: int = 0) -> str:
     pipeline = RFPDataIngestion()
     pipeline.execute_pipeline()
-    results = DurmotIntelligence().process_results(pipeline.rfp_master_list)
+    results = DurmotIntelligence().process_results(pipeline.rfp_master_list, days=days)
     return json.dumps(results if results else {"status": "No RFPs found today."}, indent=2)
 
 @mcp.tool
-def run_friction_audit(keyword: str = "") -> str:
+def run_friction_audit(keyword: str = "", days: int = 0) -> str:
     pipeline = RFPDataIngestion()
     pipeline.execute_pipeline()
-    results = DurmotIntelligence().process_results(pipeline.rfp_master_list)
+    results = DurmotIntelligence().process_results(pipeline.rfp_master_list, days=days)
     clean_kw = keyword.strip().lower()
     if not clean_kw or clean_kw in ["all", "*"]: return json.dumps(results if results else {"status": "No active bids found."}, indent=2)
     filtered = [b for b in results if clean_kw in b['agency'].lower() or clean_kw in b['title'].lower()]
@@ -299,11 +324,11 @@ app = FastAPI(title="Aelfstone Intelligence Engine", lifespan=mcp_app.lifespan)
 app.mount("/mcp", mcp_app)
 
 @app.get("/api/sweep")
-def api_sweep(keyword: str = "", state: str = "All", type: str = "govtech", ds: bool = True, cb: bool = True, vl: bool = True, og: bool = True, pdf: bool = True):
+def api_sweep(keyword: str = "", state: str = "All", type: str = "govtech", days: int = 0, ds: bool = True, cb: bool = True, vl: bool = True, og: bool = True, pdf: bool = True):
     pipeline = RFPDataIngestion(toggles={"demandstar": ds, "centralbidding": cb, "vendorlink": vl, "opengov": og}, profile_name=type)
     pipeline.execute_pipeline()
     intelligence = DurmotIntelligence(deep_scrape=pdf, profile_name=type)
-    results = intelligence.process_results(pipeline.rfp_master_list)
+    results = intelligence.process_results(pipeline.rfp_master_list, days=days)
     
     # Optional keyword filter
     clean_kw = keyword.strip().lower()
@@ -312,153 +337,4 @@ def api_sweep(keyword: str = "", state: str = "All", type: str = "govtech", ds: 
         
     # Optional State filter
     if state != "All":
-        # Handle OpenGov's "US" state assignment by matching agency names or assuming broad coverage
-        results = [b for b in results if b['state'].upper() == state.upper() or b['state'] == 'US']
-
-    return results if results else {"status": "No targets found for this configuration."}
-
-@app.get("/api/checkbook")
-def api_checkbook(agency: str = "", vendor: str = ""):
-    if not agency or not vendor: return {"error": "Both agency and vendor required."}
-    return query_municipal_checkbook(agency, vendor)
-
-@app.get("/api/opensecrets")
-def api_opensecrets(vendor: str = ""):
-    if not vendor: return {"error": "Vendor name required."}
-    return query_opensecrets_api(vendor)
-
-@app.get("/", response_class=HTMLResponse)
-def serve_dashboard():
-    return """
-    <!DOCTYPE html>
-    <html lang="en">
-    <head>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>Aelfstone Terminal</title>
-        <style>
-            body { background-color: #0a0e17; color: #a5b4fc; font-family: 'Courier New', Courier, monospace; margin: 0; padding: 30px; }
-            h1 { color: #818cf8; border-bottom: 1px solid #1e293b; padding-bottom: 10px; margin-bottom: 30px; font-size: 1.5em; letter-spacing: 2px;}
-            .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 20px; margin-bottom: 20px; }
-            .panel { background-color: #0f172a; padding: 20px; border-radius: 4px; border: 1px solid #334155; }
-            h3 { margin-top: 0; color: #38bdf8; font-size: 1.1em; border-bottom: 1px solid #1e293b; padding-bottom: 10px;}
-            input[type="text"], select { background: #1e293b; border: 1px solid #475569; color: #f8fafc; padding: 10px; width: calc(100% - 22px); border-radius: 2px; margin-bottom: 10px; font-family: inherit; }
-            select { width: 100%; cursor: pointer; }
-            input[type="text"]:focus, select:focus { outline: none; border-color: #38bdf8; }
-            input[type="checkbox"] { margin-right: 8px; accent-color: #38bdf8;}
-            label { font-size: 0.9em; display: inline-block; margin-bottom: 8px; cursor: pointer; color: #cbd5e1;}
-            button { background: #2563eb; border: none; color: white; padding: 12px; cursor: pointer; border-radius: 2px; font-weight: bold; width: 100%; text-transform: uppercase; letter-spacing: 1px; transition: background 0.2s; margin-top: 10px;}
-            button:hover { background: #1d4ed8; }
-            .output-panel { background-color: #0f172a; padding: 20px; border-radius: 4px; border: 1px solid #334155; min-height: 500px; max-height: 800px; overflow-y: auto;}
-            pre { color: #10b981; white-space: pre-wrap; word-wrap: break-word; margin: 0; font-size: 0.9em; line-height: 1.4;}
-            .status { margin-top: 10px; font-size: 0.85em; color: #fbbf24; display: none; text-align: center; }
-            .controls-group { display: flex; gap: 10px; margin-bottom: 10px; }
-        </style>
-    </head>
-    <body>
-        <h1>⌖ AELFSTONE INTELLIGENCE PLATFORM</h1>
-        
-        <div class="grid">
-            <div class="panel">
-                <h3>1. MARKET DRAGNET (PHASE 1)</h3>
-                <div class="controls-group">
-                    <select id="sweepType">
-                        <option value="govtech">Target: GovTech & Software</option>
-                        <option value="construction">Target: Construction & Roofing</option>
-                        <option value="all">Target: All Industries (Unfiltered)</option>
-                    </select>
-                </div>
-                <div class="controls-group">
-                    <select id="sweepState">
-                        <option value="All">Location: Nationwide</option>
-                        <option value="FL">Location: Florida</option>
-                        <option value="TX">Location: Texas</option>
-                        <option value="CA">Location: California</option>
-                        <option value="NY">Location: New York</option>
-                    </select>
-                </div>
-                <input type="text" id="sweepKw" placeholder="Optional Keyword (e.g., Orlando)">
-                
-                <div style="margin-top: 15px; border-top: 1px solid #1e293b; padding-top: 10px;">
-                    <label><input type="checkbox" id="t_ds" checked> DemandStar (BYOT)</label><br>
-                    <label><input type="checkbox" id="t_cb" checked> Central Bidding (BYOT)</label><br>
-                    <label><input type="checkbox" id="t_vl" checked> VendorLink (BYOT)</label><br>
-                    <label><input type="checkbox" id="t_og" checked> OpenGov (Historical / Free)</label><br>
-                    <label><input type="checkbox" id="t_pdf" checked> Deep PDF Inspection</label>
-                </div>
-
-                <button onclick="runSweep()">Initialize Dragnet</button>
-                <div id="sweepStatus" class="status">Intercepting Network Nodes...</div>
-            </div>
-
-            <div style="display: flex; flex-direction: column; gap: 20px;">
-                <div class="panel">
-                    <h3>2. CHECKBOOK FORENSICS</h3>
-                    <input type="text" id="cbAgency" placeholder="Agency (e.g., Orange County)">
-                    <input type="text" id="cbVendor" placeholder="Vendor (e.g., Tyler)">
-                    <button onclick="runCheckbook()">Run Diagnostic</button>
-                    <div id="cbStatus" class="status">Querying Municipal Ledgers...</div>
-                </div>
-
-                <div class="panel">
-                    <h3>3. OPENSECRETS AUDIT</h3>
-                    <input type="text" id="osVendor" placeholder="Vendor (e.g., Oracle)">
-                    <button onclick="runOpenSecrets()">Trace Capital</button>
-                    <div id="osStatus" class="status">Tracing PAC Contributions...</div>
-                </div>
-            </div>
-        </div>
-
-        <div class="output-panel">
-            <pre id="output">System Ready. Awaiting Command Sequence...</pre>
-        </div>
-
-        <script>
-            async function runSweep() {
-                document.getElementById('sweepStatus').style.display = 'block';
-                document.getElementById('output').innerText = 'Compiling intelligence. This may take 15-30 seconds depending on payload size...';
-                
-                const kw = encodeURIComponent(document.getElementById('sweepKw').value);
-                const type = encodeURIComponent(document.getElementById('sweepType').value);
-                const state = encodeURIComponent(document.getElementById('sweepState').value);
-                
-                const ds = document.getElementById('t_ds').checked;
-                const cb = document.getElementById('t_cb').checked;
-                const vl = document.getElementById('t_vl').checked;
-                const og = document.getElementById('t_og').checked;
-                const pdf = document.getElementById('t_pdf').checked;
-
-                try {
-                    const response = await fetch(`/api/sweep?keyword=${kw}&type=${type}&state=${state}&ds=${ds}&cb=${cb}&vl=${vl}&og=${og}&pdf=${pdf}`);
-                    document.getElementById('output').innerText = JSON.stringify(await response.json(), null, 2);
-                } catch (err) { document.getElementById('output').innerText = 'Error: ' + err; }
-                document.getElementById('sweepStatus').style.display = 'none';
-            }
-
-            async function runCheckbook() {
-                document.getElementById('cbStatus').style.display = 'block';
-                document.getElementById('output').innerText = 'Initializing SerpApi OSINT Protocol...';
-                try {
-                    const response = await fetch('/api/checkbook?agency=' + encodeURIComponent(document.getElementById('cbAgency').value) + '&vendor=' + encodeURIComponent(document.getElementById('cbVendor').value));
-                    document.getElementById('output').innerText = JSON.stringify(await response.json(), null, 2);
-                } catch (err) { document.getElementById('output').innerText = 'Error: ' + err; }
-                document.getElementById('cbStatus').style.display = 'none';
-            }
-
-            async function runOpenSecrets() {
-                document.getElementById('osStatus').style.display = 'block';
-                document.getElementById('output').innerText = 'Accessing OpenSecrets Disclosure Database...';
-                try {
-                    const response = await fetch('/api/opensecrets?vendor=' + encodeURIComponent(document.getElementById('osVendor').value));
-                    document.getElementById('output').innerText = JSON.stringify(await response.json(), null, 2);
-                } catch (err) { document.getElementById('output').innerText = 'Error: ' + err; }
-                document.getElementById('osStatus').style.display = 'none';
-            }
-        </script>
-    </body>
-    </html>
-    """
-
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 8000))
-    uvicorn.run(app, host="0.0.0.0", port=port)
+        # Handle OpenGov's "US" state assignment by matching agency names or assuming broad
