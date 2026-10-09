@@ -112,7 +112,7 @@ class RFPDataIngestion:
 
     def bypass_opengov_api(self):
         if not self.toggles.get("opengov"): return
-        logging.info("--> [OpenGov] Executing National Historical & Active Sweep...")
+        logging.info("--> [OpenGov] Executing National Historical Sweep...")
         national_portals = [
             "orlando", "orangecountyfl", "citrusfl", "cityofgainesville", "miamibeach", 
             "tampa", "palmbeachcounty", "sarasotacounty", "leecountyfl", "polkcounty", 
@@ -129,8 +129,12 @@ class RFPDataIngestion:
         for portal in national_portals:
             try:
                 url = f"https://api.procurement.opengov.com/api/v1/government/{portal}/project/public"
-                payload = {"limit": 100, "page": 1}
+                
+                # FIX INJECTED: "filters" required by OpenGov API to prevent 400 Bad Request
+                payload = {"filters": [{"type": "status", "value": "closed"}], "limit": 100, "page": 1}
+                
                 response = tls_requests.post(url, headers=headers, json=payload, impersonate="chrome120", timeout=5)
+                
                 if response.status_code == 200:
                     projects = response.json().get('data', [])
                     for item in projects:
@@ -144,6 +148,8 @@ class RFPDataIngestion:
                             "url": f"https://procurement.opengov.com/portal/{portal}/projects/{item.get('id')}" if item.get('id') else ""
                         })
                         total_opengov += 1
+                else:
+                    logging.warning(f"--> [OpenGov] {portal} rejected payload. HTTP {response.status_code}")
             except Exception: pass
         logging.info(f"--> [OpenGov] National Sweep Complete. Bids collected: {total_opengov}")
 
