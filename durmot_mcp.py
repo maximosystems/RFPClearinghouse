@@ -30,7 +30,7 @@ class RFPDataIngestion:
         self.rfp_master_list = []
 
     def intercept_demandstar_xhr(self):
-        logging.info("Intercepting Primary Nodes (Ghost Mode)...")
+        logging.info("Intercepting Primary Nodes (Nationwide DemandStar)...")
         url = "https://api.demandstar.com/contents/content/v1/bids/search"
         raw_token = os.environ.get("DEMANDSTAR_TOKEN", "")
         auth_token = re.sub(r'[\r\n]+', '', raw_token).strip()
@@ -68,10 +68,12 @@ class RFPDataIngestion:
                     data = response.json()
                     bids = data.get('result', []) if isinstance(data, dict) else data
                     for item in bids:
+                        raw_state = item.get('state') or item.get('agencyState') or item.get('broadcastState') or 'US'
                         self.rfp_master_list.append({
-                            "source": "Public-Notice-Network", 
+                            "source": "DemandStar", 
                             "title": item.get('bidName', 'Unknown Title'),
                             "agency": item.get('agency', 'Unknown Agency'),
+                            "state": str(raw_state).strip().upper(),
                             "published_date": item.get('broadCastDate', ''),
                             "raw_metadata": item,
                             "url": f"https://www.demandstar.com/app/bids/{item.get('bidId', '')}"
@@ -80,7 +82,7 @@ class RFPDataIngestion:
                 pass
 
     def bypass_opengov_api(self):
-        logging.info("Intercepting Secondary Nodes...")
+        logging.info("Intercepting Secondary Nodes (OpenGov Portals)...")
         florida_portals = ["orlando", "citrusfl", "cityofgainesville"]
         headers = {
             "accept": "application/json, text/plain, */*",
@@ -98,9 +100,10 @@ class RFPDataIngestion:
                     projects = data.get('data', []) if isinstance(data, dict) else data
                     for item in projects:
                         self.rfp_master_list.append({
-                            "source": "Onvia-Synced-Node", 
+                            "source": "OpenGov", 
                             "title": item.get('title', item.get('name', 'Unknown Title')),
                             "agency": portal.replace('cityof', 'City of ').title(),
+                            "state": "FL",
                             "published_date": item.get('publishedAt', item.get('releaseDate', '')),
                             "raw_metadata": item,
                             "url": f"https://procurement.opengov.com/portal/{portal}/projects/{item.get('id')}" if item.get('id') else ""
@@ -132,7 +135,6 @@ class DurmotIntelligence:
             r"\bmandatory pre-bid\b": 25,
             r"\bno substitutions\b": 30
         }
-        # NEW: The engine will actively hunt for these entities in the deep text
         self.known_vendors = [
             "Tyler Technologies", "CentralSquare", "Oracle", "Workday", 
             "OpenGov", "Munis", "CivicPlus", "Accela", "Superion"
@@ -171,14 +173,11 @@ class DurmotIntelligence:
                 friction_score += points
                 friction_flags.append(pattern.replace(r"\b", "").strip().title())
 
-        # NEW: Extract the suspected incumbent from the text
         suspected_vendors = [vendor for vendor in self.known_vendors if vendor.lower() in search_text]
                 
         rfp['friction_score'] = min(friction_score, 100)
         rfp['friction_flags'] = friction_flags
         rfp['raw_metadata']['durmot_stack_matches'] = list(set(stack_matches)) 
-        
-        # NEW: Attach the suspect directly to the payload
         rfp['suspected_incumbent'] = suspected_vendors[0] if suspected_vendors else None
         
         return rfp
@@ -190,13 +189,22 @@ class DurmotIntelligence:
             rfp = self.score_and_flag(raw_rfp)
             if not rfp: continue
             
-            # NEW: We format the payload to explicitly guide Claude's next action
+            # Ordered layout for unified nationwide reporting
             processed.append({
+                # 1. Geographic & Origin Identification
                 "agency": rfp['agency'],
+                "state": rfp.get('state', 'US'),
                 "title": rfp['title'],
+                "published_date": rfp.get('published_date', ''),
+                "source": rfp.get('source', 'Unknown'),
+                
+                # 2. Forensic Triad Diagnostics
                 "friction_score": rfp['friction_score'],
                 "friction_flags": rfp['friction_flags'],
                 "suspected_incumbent": rfp['suspected_incumbent'],
+                "tech_stack_hits": rfp['raw_metadata'].get('durmot_stack_matches', []),
+                
+                # 3. Agentic Autopilot & Source Links
                 "ai_next_action_prompt": f"If suspected_incumbent is not null, run audit_vendor_checkbook for '{rfp['agency']}' and '{rfp['suspected_incumbent']}'." if rfp['suspected_incumbent'] else "No clear incumbent identified.",
                 "url": rfp.get('url', 'No URL provided') 
             })
@@ -210,14 +218,13 @@ class DurmotIntelligence:
 # ==============================================================================
 
 def query_opensecrets_api(vendor_name):
-    """Hits the OpenSecrets REST API to find PAC and lobbying totals."""
+    """Queries the OpenSecrets REST API to find PAC and lobbying totals."""
     api_key = os.environ.get("OPENSECRETS_API_KEY")
     if not api_key:
-        return {"error": "OPENSECRETS_API_KEY environment variable is not set. Please add it to your Railway config."}
+        return {"error": "OPENSECRETS_API_KEY environment variable is not set."}
 
     logging.info(f"Querying OpenSecrets API for: {vendor_name}")
     try:
-        # Step 1: Find the Organization ID
         org_search_url = f"http://www.opensecrets.org/api/?method=getOrgs&org={urllib.parse.quote(vendor_name)}&apikey={api_key}&output=json"
         res = tls_requests.get(org_search_url, timeout=10)
         
@@ -230,7 +237,6 @@ def query_opensecrets_api(vendor_name):
         if not orgs:
             return {"status": f"No OpenSecrets profile found for '{vendor_name}'."}
 
-        # OpenSecrets returns a dict if there's only 1 match, or a list for multiple matches
         if isinstance(orgs, dict):
             orgs = [orgs]
 
@@ -241,7 +247,6 @@ def query_opensecrets_api(vendor_name):
         if not org_id:
             return {"error": "Failed to extract Organization ID from OpenSecrets."}
 
-        # Step 2: Retrieve the Organization Summary using the ID
         summary_url = f"http://www.opensecrets.org/api/?method=orgSummary&id={org_id}&apikey={api_key}&output=json"
         sum_res = tls_requests.get(summary_url, timeout=10)
         sum_data = sum_res.json()
@@ -264,16 +269,15 @@ def query_opensecrets_api(vendor_name):
 
 def query_municipal_checkbook(agency_name, vendor_name):
     """
-    OSINT checkbook scanner via SerpApi. Queries Google's index for 
-    the vendor name cross-referenced with 'Change Order' or 'Amendment'.
+    OSINT checkbook scanner via SerpApi. Queries indexed municipal records
+    for change orders, budget amendments, and contingencies.
     """
     logging.info(f"Scanning open checkbooks via SerpApi for: {vendor_name} at {agency_name}")
     api_key = os.environ.get("SERPAPI_KEY")
     
     if not api_key:
-        return {"error": "SERPAPI_KEY is missing from environment variables. Please add it to your Railway config."}
+        return {"error": "SERPAPI_KEY is missing from environment variables."}
 
-    # Highly targeted Google dork
     query = f'"{vendor_name}" "{agency_name}" "change order" OR "amendment" OR "contingency" OR "increase"'
     url = f"https://serpapi.com/search.json?engine=google&q={urllib.parse.quote_plus(query)}&api_key={api_key}"
     
@@ -284,13 +288,11 @@ def query_municipal_checkbook(agency_name, vendor_name):
             return {"error": f"SerpApi returned status {res.status_code}: {res.text}"}
              
         data = res.json()
-        
         results = []
         organic_results = data.get("organic_results", [])
         
         for item in organic_results:
             snippet = item.get("snippet", "")
-            # Verify the snippet actually contains evidence of our trap
             if vendor_name.lower() in snippet.lower() and any(kw in snippet.lower() for kw in ['change order', 'amend', 'increase']):
                 results.append({
                     "title": item.get("title", "Unknown Document"),
@@ -301,7 +303,6 @@ def query_municipal_checkbook(agency_name, vendor_name):
         if not results:
             return {"status": f"No public change orders or budget increases found for {vendor_name} at {agency_name}."}
             
-        # If we find 2 or more indexed change orders in the top results, it's a massive red flag.
         risk_flag = "HIGH (Multiple historical budget expansions detected)" if len(results) >= 2 else "MODERATE"
         
         return {
@@ -320,10 +321,22 @@ def query_municipal_checkbook(agency_name, vendor_name):
 # ==============================================================================
 
 @mcp.tool
+def get_all_nationwide_rfps() -> str:
+    """
+    Scrapes the entire nationwide firehose of GovTech RFPs across all connected nodes.
+    Returns all bids (both high-friction and zero-friction) sorted by Friction Score descending.
+    """
+    pipeline = RFPDataIngestion()
+    pipeline.execute_pipeline()
+    intelligence = DurmotIntelligence()
+    results = intelligence.process_results(pipeline.rfp_master_list)
+    return json.dumps(results if results else {"status": "No RFPs found today."}, indent=2)
+
+@mcp.tool
 def get_clean_leads() -> str:
     """
-    Scrapes live municipal notices across Florida, applies the proprietary 
-    Friction Score to filter out rigged bids, and returns zero-friction Prime Leads.
+    Scrapes active notices nationwide, applies the Friction Score,
+    and returns only zero-friction Prime Leads (friction_score == 0).
     """
     pipeline = RFPDataIngestion()
     pipeline.execute_pipeline()
@@ -333,17 +346,32 @@ def get_clean_leads() -> str:
     return json.dumps(prime if prime else {"status": "No zero-friction Prime Leads found today."}, indent=2)
 
 @mcp.tool
-def run_friction_audit(agency_keyword: str) -> str:
+def run_friction_audit(keyword: str = "") -> str:
     """
-    Forensically audits active procurement notices for a specific agency keyword 
-    (e.g., 'Orlando', 'Citrus') to expose incumbent traps, sole-source flags, and lock-in language.
+    Audits active notices matching an agency, state code (e.g., 'FL', 'TX'),
+    or regional keyword (e.g., 'Orlando', 'Florida') to expose sole-source flags and incumbent locks.
+    Leaving keyword empty or passing 'all' returns the full nationwide ranked list.
     """
     pipeline = RFPDataIngestion()
     pipeline.execute_pipeline()
     intelligence = DurmotIntelligence()
     results = intelligence.process_results(pipeline.rfp_master_list)
-    filtered = [b for b in results if agency_keyword.lower() in b['agency'].lower()]
-    return json.dumps(filtered if filtered else {"status": f"No active bids found matching '{agency_keyword}'."}, indent=2)
+    
+    clean_kw = keyword.strip().lower()
+    if not clean_kw or clean_kw in ["all", "nationwide", "*"]:
+        return json.dumps(results if results else {"status": "No active bids found."}, indent=2)
+
+    # Match on agency name, state abbreviation, or title
+    state_names = {"florida": "FL", "texas": "TX", "california": "CA", "georgia": "GA", "new york": "NY"}
+    target_state = state_names.get(clean_kw, clean_kw.upper())
+
+    filtered = [
+        b for b in results 
+        if clean_kw in b['agency'].lower() 
+        or b['state'].upper() == target_state 
+        or clean_kw in b['title'].lower()
+    ]
+    return json.dumps(filtered if filtered else {"status": f"No active bids found matching '{keyword}'."}, indent=2)
 
 @mcp.tool
 def audit_vendor_lobbying(vendor_name: str) -> str:
@@ -364,6 +392,5 @@ def audit_vendor_checkbook(agency_name: str, vendor_name: str) -> str:
     return json.dumps([report], indent=2)
 
 if __name__ == "__main__":
-    # Expose the server using Server-Sent Events (SSE) so clients can connect over the internet via Railway.
     port = int(os.environ.get("PORT", 8000))
     mcp.run(transport='sse', host='0.0.0.0', port=port)
