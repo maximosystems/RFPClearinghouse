@@ -123,7 +123,6 @@ class RFPDataIngestion:
             "raleigh", "wakecounty", "atlantaga"
         ]
         
-        # Headers directly mirrored from the cURL audit
         headers = {
             "accept": "*/*", 
             "content-type": "application/json",
@@ -134,12 +133,9 @@ class RFPDataIngestion:
         total_opengov = 0
         
         for portal in national_portals:
-            # Sweeping all 3 statuses observed in the exact format OpenGov requires
             for status in ["open", "evaluation", "closed"]:
                 try:
                     url = f"https://api.procurement.opengov.com/api/v1/government/{portal}/project/public"
-                    
-                    # Exact payload structure from your DevTools audit (page is 0-indexed!)
                     payload = {
                         "filters": [{"type": "status", "value": status}],
                         "quickSearchQuery": None,
@@ -152,7 +148,18 @@ class RFPDataIngestion:
                     response = tls_requests.post(url, headers=headers, json=payload, impersonate="chrome120", timeout=5)
                     
                     if response.status_code == 200:
-                        projects = response.json().get('data', [])
+                        json_resp = response.json()
+                        logging.info(f"--> [DEBUG 200 SUCCESS] {portal} ({status}) returned keys: {list(json_resp.keys())}")
+                        
+                        # Aggressively hunt for the data list regardless of naming
+                        if 'data' in json_resp: projects = json_resp['data']
+                        elif 'projects' in json_resp: projects = json_resp['projects']
+                        elif 'items' in json_resp: projects = json_resp['items']
+                        elif 'results' in json_resp: projects = json_resp['results']
+                        else:
+                            projects = []
+                            logging.error(f"--> [DEBUG ERROR] Could not find the project list! Snippet: {str(json_resp)[:200]}")
+                            
                         for item in projects:
                             self.rfp_master_list.append({
                                 "source": "OpenGov", 
@@ -164,8 +171,10 @@ class RFPDataIngestion:
                                 "url": f"https://procurement.opengov.com/portal/{portal}/projects/{item.get('id')}" if item.get('id') else ""
                             })
                             total_opengov += 1
-                except Exception: 
-                    pass
+                    else:
+                        logging.warning(f"--> [DEBUG FAIL] {portal} rejected payload. HTTP {response.status_code}")
+                except Exception as e: 
+                    logging.error(f"--> [DEBUG CRASH] Error hitting {portal}: {str(e)}")
                     
         logging.info(f"--> [OpenGov] National Sweep Complete. Bids collected: {total_opengov}")
 
