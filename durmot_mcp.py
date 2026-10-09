@@ -32,9 +32,9 @@ mcp = FastMCP("Aelfstone Intelligence Engine")
 INDUSTRY_PROFILES = {
     "govtech": {
         "search_terms": ["software", "erp", "system", "technology", "billing", "cloud"],
-        "tech_stack": [r"\bsoftware\b", r"\berp\b", r"\butility billing\b", r"\bcrm\b", r"\btyler\b", r"\bmunis\b", r"\bopengov\b", r"\bcloud\b"],
+        "tech_stack": [r"\bsoftware\b", r"\berp\b", r"\butility billing\b", r"\bcrm\b", r"\btyler\b", r"\bmunis\b", r"\bcloud\b", r"\bsaas\b"],
         "disqualify": [r"\bwater treatment\b", r"\bpump station\b", r"\bsewer\b", r"\bdirectional boring\b", r"\bconcrete\b", r"\basphalt\b", r"\broofing\b"],
-        "vendors": ["Tyler Technologies", "CentralSquare", "Oracle", "Workday", "OpenGov", "Munis", "CivicPlus"]
+        "vendors": ["Tyler Technologies", "CentralSquare", "Oracle", "Workday", "Munis", "CivicPlus"]
     },
     "construction": {
         "search_terms": ["roofing", "asphalt", "concrete", "paving", "construction", "hvac", "renovation"],
