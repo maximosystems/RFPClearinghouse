@@ -112,7 +112,7 @@ class RFPDataIngestion:
 
     def bypass_opengov_api(self):
         if not self.toggles.get("opengov"): return
-        logging.info("--> [OpenGov] Executing National Historical Sweep...")
+        logging.info("--> [OpenGov] Executing National Historical & Active Sweep...")
         national_portals = [
             "orlando", "orangecountyfl", "citrusfl", "cityofgainesville", "miamibeach", 
             "tampa", "palmbeachcounty", "sarasotacounty", "leecountyfl", "polkcounty", 
@@ -127,30 +127,30 @@ class RFPDataIngestion:
         total_opengov = 0
         
         for portal in national_portals:
-            try:
-                url = f"https://api.procurement.opengov.com/api/v1/government/{portal}/project/public"
-                
-                # FIX INJECTED: "filters" required by OpenGov API to prevent 400 Bad Request
-                payload = {"filters": [{"type": "status", "value": "closed"}], "limit": 100, "page": 1}
-                
-                response = tls_requests.post(url, headers=headers, json=payload, impersonate="chrome120", timeout=5)
-                
-                if response.status_code == 200:
-                    projects = response.json().get('data', [])
-                    for item in projects:
-                        self.rfp_master_list.append({
-                            "source": "OpenGov", 
-                            "title": item.get('title', item.get('name', 'Unknown Title')),
-                            "agency": portal.replace('cityof', 'City of ').title(),
-                            "state": "US", 
-                            "published_date": item.get('publishedAt', item.get('releaseDate', '')),
-                            "raw_metadata": item,
-                            "url": f"https://procurement.opengov.com/portal/{portal}/projects/{item.get('id')}" if item.get('id') else ""
-                        })
-                        total_opengov += 1
-                else:
-                    logging.warning(f"--> [OpenGov] {portal} rejected payload. HTTP {response.status_code}")
-            except Exception: pass
+            # FIX: Loop through both valid statuses to prevent 404 errors on "closed"
+            for status in ["active", "awarded"]:
+                try:
+                    url = f"https://api.procurement.opengov.com/api/v1/government/{portal}/project/public"
+                    payload = {"filters": [{"type": "status", "value": status}], "limit": 100, "page": 1}
+                    
+                    response = tls_requests.post(url, headers=headers, json=payload, impersonate="chrome120", timeout=5)
+                    
+                    if response.status_code == 200:
+                        projects = response.json().get('data', [])
+                        for item in projects:
+                            self.rfp_master_list.append({
+                                "source": "OpenGov", 
+                                "title": item.get('title', item.get('name', 'Unknown Title')),
+                                "agency": portal.replace('cityof', 'City of ').title(),
+                                "state": "US", 
+                                "published_date": item.get('publishedAt', item.get('releaseDate', '')),
+                                "raw_metadata": item,
+                                "url": f"https://procurement.opengov.com/portal/{portal}/projects/{item.get('id')}" if item.get('id') else ""
+                            })
+                            total_opengov += 1
+                except Exception: 
+                    pass
+                    
         logging.info(f"--> [OpenGov] National Sweep Complete. Bids collected: {total_opengov}")
 
     def execute_pipeline(self):
@@ -502,42 +502,4 @@ def serve_dashboard():
                 const days = encodeURIComponent(document.getElementById('sweepDays').value);
                 
                 const ds = document.getElementById('t_ds').checked;
-                const cb = document.getElementById('t_cb').checked;
-                const vl = document.getElementById('t_vl').checked;
-                const og = document.getElementById('t_og').checked;
-                const pdf = document.getElementById('t_pdf').checked;
-
-                try {
-                    const response = await fetch(`/api/sweep?keyword=${kw}&type=${type}&state=${state}&days=${days}&ds=${ds}&cb=${cb}&vl=${vl}&og=${og}&pdf=${pdf}`);
-                    document.getElementById('output').innerText = JSON.stringify(await response.json(), null, 2);
-                } catch (err) { document.getElementById('output').innerText = 'Error: ' + err; }
-                document.getElementById('sweepStatus').style.display = 'none';
-            }
-
-            async function runCheckbook() {
-                document.getElementById('cbStatus').style.display = 'block';
-                document.getElementById('output').innerText = 'Initializing SerpApi OSINT Protocol...';
-                try {
-                    const response = await fetch('/api/checkbook?agency=' + encodeURIComponent(document.getElementById('cbAgency').value) + '&vendor=' + encodeURIComponent(document.getElementById('cbVendor').value));
-                    document.getElementById('output').innerText = JSON.stringify(await response.json(), null, 2);
-                } catch (err) { document.getElementById('output').innerText = 'Error: ' + err; }
-                document.getElementById('cbStatus').style.display = 'none';
-            }
-
-            async function runOpenSecrets() {
-                document.getElementById('osStatus').style.display = 'block';
-                document.getElementById('output').innerText = 'Accessing OpenSecrets Disclosure Database...';
-                try {
-                    const response = await fetch('/api/opensecrets?vendor=' + encodeURIComponent(document.getElementById('osVendor').value));
-                    document.getElementById('output').innerText = JSON.stringify(await response.json(), null, 2);
-                } catch (err) { document.getElementById('output').innerText = 'Error: ' + err; }
-                document.getElementById('osStatus').style.display = 'none';
-            }
-        </script>
-    </body>
-    </html>
-    """
-
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 8000))
-    uvicorn.run(app, host="0.0.0.0", port=port)
+                const
