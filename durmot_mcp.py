@@ -231,10 +231,7 @@ class DurmotIntelligence:
         
         self.friction_heuristics = {
             r"\bsole source\b": 40, r"\bproprietary\b": 30, r"\bbrand name only\b": 35,
-            r"\bincumbent\b": 20, r"\bmandatory pre-bid\b": 25, r"\bno substitutions\b": 30,
-            r"\bpiggyback\b": 35, r"\bcooperative purchasing\b": 35, r"\bsourcewell\b": 30,
-            r"\bomnia partners\b": 30, r"\bnaspo\b": 30,
-            r"METADATA_GHOSTWRITER_FLAG": 50
+            r"\bincumbent\b": 20, r"\bmandatory pre-bid\b": 25, r"\bno substitutions\b": 30
         }
 
     def scrape_deep_text(self, url):
@@ -244,19 +241,7 @@ class DurmotIntelligence:
             if res.status_code == 200:
                 if url.lower().endswith('.pdf') or 'application/pdf' in res.headers.get('Content-Type', '').lower():
                     reader = PdfReader(io.BytesIO(res.content))
-                    
-                    # --- METADATA FORENSICS INJECTION ---
-                    hidden_text = ""
-                    meta = reader.metadata
-                    if meta:
-                        author_data = f"{meta.get('/Author', '')} {meta.get('/Creator', '')}".lower()
-                        if any(v.lower() in author_data for v in self.known_vendors):
-                            hidden_text = "METADATA_GHOSTWRITER_FLAG "
-                    # ------------------------------------
-                    
-                    pdf_text = " ".join([page.extract_text() for page in reader.pages[:8] if page.extract_text()]).lower()
-                    return hidden_text + pdf_text
-                
+                    return " ".join([page.extract_text() for page in reader.pages[:8] if page.extract_text()]).lower()
                 return BeautifulSoup(res.text, 'html.parser').get_text(separator=' ', strip=True).lower()
         except Exception: pass
         return ""
@@ -319,12 +304,8 @@ def query_municipal_checkbook(agency_name, vendor_name):
     api_key = os.environ.get("SERPER_API_KEY")
     if not api_key: return {"error": "SERPER_API_KEY is missing. Get a free one at serper.dev"}
     
-    # Expanded Google Dork to target both Genesis Awards and Piggyback vectors, strictly grouped
-    query = (
-        f'"{vendor_name}" "{agency_name}" '
-        f'("Initial Award" OR "Notice of Intent" OR "Contract Award" OR "piggyback" OR "cooperative purchasing" OR "rider agreement") '
-        f'-site:indeed.com -site:glassdoor.com -inurl:job -inurl:careers'
-    )
+    # Hunting for the Genesis documents instead of just change orders
+    query = f'"{vendor_name}" "{agency_name}" "Initial Award" OR "Notice of Intent" OR "Contract Award"'
     
     headers = {
         "X-API-KEY": api_key,
