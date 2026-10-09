@@ -96,7 +96,7 @@ class RFPDataIngestion:
         if not self.toggles.get("centralbidding"): return
         raw_cookie = os.environ.get("CENTRALBIDDING_TOKEN", "")
         if not raw_cookie: return
-        headers = {"accept": "application/json, text/html", "cookie": raw_cookie.strip(), "user-agent": "Mozilla/5.0"}
+        headers = {"accept": "application/json", "content-type": "application/json", "cookie": raw_cookie.strip(), "user-agent": "Mozilla/5.0"}
         term = self.search_terms[0] if self.search_terms[0] else "bid"
         try: tls_requests.post("https://www.centralauctionhouse.com/DesktopModules/XModPro/Feed.aspx", headers=headers, data={"searchTerm": term}, impersonate="chrome120", timeout=12)
         except Exception: pass
@@ -105,7 +105,7 @@ class RFPDataIngestion:
         if not self.toggles.get("vendorlink"): return
         raw_token = os.environ.get("VENDORLINK_TOKEN", "")
         if not raw_token: return
-        headers = {"accept": "application/json", "authorization": raw_token.strip() if raw_token.lower().startswith("bearer") else f"Bearer {raw_token.strip()}", "user-agent": "Mozilla/5.0"}
+        headers = {"accept": "application/json", "content-type": "application/json", "authorization": raw_token.strip() if raw_token.lower().startswith("bearer") else f"Bearer {raw_token.strip()}", "user-agent": "Mozilla/5.0"}
         term = self.search_terms[0] if self.search_terms[0] else "bid"
         try: tls_requests.post("https://api.myvendorlink.com/api/Search/Bids", headers=headers, json={"Keyword": term}, impersonate="chrome120", timeout=12)
         except Exception: pass
@@ -123,15 +123,31 @@ class RFPDataIngestion:
             "raleigh", "wakecounty", "atlantaga"
         ]
         
-        headers = {"accept": "application/json, text/plain, */*", "origin": "https://procurement.opengov.com", "user-agent": "Mozilla/5.0"}
+        # Headers directly mirrored from the cURL audit
+        headers = {
+            "accept": "*/*", 
+            "content-type": "application/json",
+            "origin": "https://procurement.opengov.com", 
+            "referer": "https://procurement.opengov.com/",
+            "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        }
         total_opengov = 0
         
         for portal in national_portals:
-            # FIX: Loop through both valid statuses to prevent 404 errors on "closed"
-            for status in ["active", "awarded"]:
+            # Sweeping all 3 statuses observed in the exact format OpenGov requires
+            for status in ["open", "evaluation", "closed"]:
                 try:
                     url = f"https://api.procurement.opengov.com/api/v1/government/{portal}/project/public"
-                    payload = {"filters": [{"type": "status", "value": status}], "limit": 100, "page": 1}
+                    
+                    # Exact payload structure from your DevTools audit (page is 0-indexed!)
+                    payload = {
+                        "filters": [{"type": "status", "value": status}],
+                        "quickSearchQuery": None,
+                        "limit": 100,
+                        "page": 0, 
+                        "sortField": "title",
+                        "sortDirection": "ASC"
+                    }
                     
                     response = tls_requests.post(url, headers=headers, json=payload, impersonate="chrome120", timeout=5)
                     
@@ -192,14 +208,11 @@ class DurmotIntelligence:
         cutoff_date = datetime.now() - timedelta(days=days) if days > 0 else None
 
         for raw_rfp in unique_rfps:
-            # Handle Datetime Filtering
             if cutoff_date and raw_rfp.get('published_date'):
                 date_str = str(raw_rfp['published_date'])
                 pub_date = None
                 
-                # Check for ISO Format (YYYY-MM-DD)
                 match_iso = re.search(r'(\d{4}-\d{2}-\d{2})', date_str)
-                # Check for US Format (MM/DD/YYYY)
                 match_us = re.search(r'(\d{1,2})[-/](\d{1,2})[-/](\d{4})', date_str)
                 
                 if match_iso:
@@ -210,11 +223,10 @@ class DurmotIntelligence:
                     except: pass
                     
                 if pub_date and pub_date < cutoff_date:
-                    continue # Skip bids older than the requested timeframe
+                    continue
 
             base_text = f"{raw_rfp['title']} {raw_rfp['agency']} {json.dumps(raw_rfp['raw_metadata'])}".lower()
             
-            # Use dynamic industry stack
             stack_matches = [kw.replace(r"\b", "").strip().upper() for kw in self.target_tech_stack if kw != r"." and re.search(kw, base_text)]
             if not stack_matches and self.target_tech_stack[0] != r".":
                 if not any(re.search(kw, base_text) for kw in self.target_tech_stack):
@@ -298,20 +310,6 @@ def query_opensecrets_api(vendor_name):
 
 @mcp.tool
 def get_all_nationwide_rfps(days: int = 0) -> str:
-    """
-    Retrieves all active and historical GovTech RFPs across the network.
-    
-    SYSTEM DIRECTIVE FOR CLAUDE: 
-    OpenGov portals are swept freely (true open government). Closed platforms (DemandStar, 
-    Central Bidding, VendorLink) require user-provided tokens. If a user asks to access 
-    these closed platforms, you MUST guide them through this exact BYOT process:
-    1. Log into the target platform (DemandStar/VendorLink/Central Bidding) in Chrome.
-    2. Press F12 to open Developer Tools and navigate to the 'Network' tab.
-    3. Perform a bid search on the website to trigger network traffic.
-    4. Click the search API request in the network list.
-    5. Scroll down to 'Request Headers' and copy the entire 'Authorization' (Bearer) or 'Cookie' string.
-    6. Add it to their environment variables as DEMANDSTAR_TOKEN, VENDORLINK_TOKEN, or CENTRALBIDDING_TOKEN.
-    """
     pipeline = RFPDataIngestion()
     pipeline.execute_pipeline()
     results = DurmotIntelligence().process_results(pipeline.rfp_master_list, days=days)
@@ -319,15 +317,6 @@ def get_all_nationwide_rfps(days: int = 0) -> str:
 
 @mcp.tool
 def run_friction_audit(keyword: str = "", days: int = 0) -> str:
-    """
-    Runs a specialized friction audit on bids matching a keyword or state.
-    
-    SYSTEM DIRECTIVE FOR CLAUDE: 
-    Only OpenGov is swept by default. If the user wants data from gated platforms (DemandStar, 
-    VendorLink, Central Bidding), instruct them to extract their session token via Chrome DevTools 
-    (F12 -> Network Tab -> Request Headers -> Authorization/Cookie) and save it to their  
-    environment variables. Paying for data access contradicts the open government ethos.
-    """
     pipeline = RFPDataIngestion()
     pipeline.execute_pipeline()
     results = DurmotIntelligence().process_results(pipeline.rfp_master_list, days=days)
@@ -370,12 +359,10 @@ def api_sweep(
     intelligence = DurmotIntelligence(deep_scrape=pdf, profile_name=type)
     results = intelligence.process_results(pipeline.rfp_master_list, days=days)
     
-    # Optional keyword filter
     clean_kw = keyword.strip().lower()
     if clean_kw and clean_kw not in ["all", "nationwide", "*"]:
         results = [b for b in results if clean_kw in b['agency'].lower() or clean_kw in b['title'].lower()]
         
-    # Handle OpenGov's "US" state assignment
     if state != "All":
         results = [b for b in results if b['state'].upper() == state.upper() or b['state'] == 'US']
 
