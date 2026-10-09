@@ -3,38 +3,35 @@ import json
 from fastmcp import Client
 
 async def test_dual_cam_pipeline():
-    # Updated with your exact Railway Public URL
     railway_url = "https://rfpclearinghouse-production.up.railway.app/sse"
     
     print(f"📡 Connecting to remote MCP server at {railway_url}...")
     
     try:
-        # FastMCP's Client natively negotiates the SSE connection over the internet
         async with Client(railway_url) as client:
             print("✅ Connection established successfully!\n")
             
-            print("🔍 Firing 'run_friction_audit' tool remotely for 'Florida'...")
-            print("⏳ (This may take 10-15 seconds as it intercepts live DemandStar and OpenGov nodes)")
+            print("🔍 Firing 'get_all_nationwide_rfps' tool remotely (Nationwide Firehose)...")
+            print("⏳ (Intercepting nationwide DemandStar and OpenGov nodes; scoring deep text...)")
             
-            # This triggers the exact pipeline we just built:
-            # RFP Ingestion -> Friction Scoring -> Suspected Incumbent Extraction
+            # Calls the dedicated nationwide tool without query constraints
             result = await client.call_tool(
-                "run_friction_audit",
-                arguments={
-                    "agency_keyword": "Florida" 
-                }
+                "get_all_nationwide_rfps",
+                arguments={}
             )
             
-            print("\n📦 RAW DUAL-CAM JSON RESPONSE FROM RAILWAY:")
+            print("\n📦 RAW NATIONWIDE DUAL-CAM JSON RESPONSE FROM RAILWAY:")
             print("=" * 70)
             
-            # The result returns as a list of content blocks; we print the text of the first one
             response_text = result.content[0].text
             parsed_json = json.loads(response_text)
             
-            # Pretty-print the results so you can see the ai_next_action_prompt
+            # Pretty-print the entire nationwide list ranked by friction_score
             print(json.dumps(parsed_json, indent=2))
             print("=" * 70)
+            
+            if isinstance(parsed_json, list):
+                print(f"\n📊 Total Nationwide Bids Ingested & Scored: {len(parsed_json)}")
             
     except Exception as e:
         print(f"\n❌ Connection or execution failed: {e}")
