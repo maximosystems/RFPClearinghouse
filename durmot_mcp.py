@@ -301,20 +301,40 @@ class DurmotIntelligence:
 # ==============================================================================
 
 def query_municipal_checkbook(agency_name, vendor_name):
-    api_key = os.environ.get("SERPAPI_KEY")
-    if not api_key: return {"error": "SERPAPI_KEY is missing."}
-    query = f'"{vendor_name}" "{agency_name}" "change order" OR "amendment" OR "contingency" OR "increase"'
+    api_key = os.environ.get("SERPER_API_KEY")
+    if not api_key: return {"error": "SERPER_API_KEY is missing. Get a free one at serper.dev"}
+    
+    # Hunting for the Genesis documents instead of just change orders
+    query = f'"{vendor_name}" "{agency_name}" "Initial Award" OR "Notice of Intent" OR "Contract Award"'
+    
+    headers = {
+        "X-API-KEY": api_key,
+        "Content-Type": "application/json"
+    }
+    
+    # Using Google's 'tbs=sbd:1' (Sort by Date) to try to surface historical genesis documents
+    payload = {
+        "q": query,
+        "tbs": "sbd:1"
+    }
+    
     try:
-        res = tls_requests.get(f"https://serpapi.com/search.json?engine=google&q={urllib.parse.quote_plus(query)}&api_key={api_key}", timeout=15)
-        if res.status_code != 200: return {"error": f"SerpApi HTTP {res.status_code}"}
+        res = tls_requests.post("https://google.serper.dev/search", headers=headers, json=payload, timeout=15)
+        if res.status_code != 200: return {"error": f"Serper API HTTP {res.status_code}"}
         
         results = [
             {"title": i.get("title", "Unknown"), "link": i.get("link", ""), "snippet": i.get("snippet", "")}
-            for i in res.json().get("organic_results", [])
-            if vendor_name.lower() in i.get("snippet", "").lower() and any(kw in i.get("snippet", "").lower() for kw in ['change order', 'amend', 'increase'])
+            for i in res.json().get("organic", [])
+            if vendor_name.lower() in i.get("snippet", "").lower()
         ]
-        if not results: return {"status": f"No public change orders found for {vendor_name} at {agency_name}."}
-        return {"agency_investigated": agency_name, "vendor_investigated": vendor_name, "bleed_ratio_risk": "HIGH" if len(results) >= 2 else "MODERATE", "evidence": results[:5]}
+        if not results: return {"status": f"No public genesis documents found for {vendor_name} at {agency_name}."}
+        
+        return {
+            "agency_investigated": agency_name, 
+            "vendor_investigated": vendor_name, 
+            "genesis_risk": "HIGH" if len(results) >= 2 else "MODERATE", 
+            "evidence": results[:5]
+        }
     except Exception as e: return {"error": str(e)}
 
 def query_opensecrets_api(vendor_name):
@@ -322,6 +342,7 @@ def query_opensecrets_api(vendor_name):
     if not api_key: return {"error": "OPENSECRETS_API_KEY environment variable is not set."}
 
     try:
+        # 1. Grab the Organization ID
         org_search_url = f"http://www.opensecrets.org/api/?method=getOrgs&org={urllib.parse.quote(vendor_name)}&apikey={api_key}&output=json"
         res = tls_requests.get(org_search_url, timeout=10)
         if res.status_code != 200: return {"error": f"OpenSecrets API returned status {res.status_code}"}
@@ -334,16 +355,45 @@ def query_opensecrets_api(vendor_name):
         org_name = orgs[0].get('@attributes', {}).get('orgname')
         if not org_id: return {"error": "Failed to extract Organization ID."}
 
-        summary_url = f"http://www.opensecrets.org/api/?method=orgSummary&id={org_id}&apikey={api_key}&output=json"
-        summary = tls_requests.get(summary_url, timeout=10).json().get('response', {}).get('organization', {}).get('@attributes', {})
+        # 2. Time Machine Loop: Step backward by 2-year election cycles to find Patient Zero
+        current_year = datetime.now().year
+        start_cycle = current_year if current_year % 2 == 0 else current_year + 1
+        
+        genesis_year = "Unknown"
+        latest_summary = None
+        
+        for cycle in range(start_cycle, 1996, -2):
+            summary_url = f"http://www.opensecrets.org/api/?method=orgSummary&id={org_id}&cycle={cycle}&apikey={api_key}&output=json"
+            summary_res = tls_requests.get(summary_url, timeout=10)
+            
+            if summary_res.status_code != 200: break
+            
+            try:
+                summary = summary_res.json().get('response', {}).get('organization', {}).get('@attributes', {})
+                total_receipts = float(summary.get('total', '0'))
+            except:
+                break
+                
+            if total_receipts > 0:
+                genesis_year = str(cycle)
+                if not latest_summary:
+                    latest_summary = summary
+            else:
+                # Dropped to 0, the previous loop was the true genesis year
+                break
+
+        if not latest_summary:
+            return {"status": f"No financial history found for '{vendor_name}'."}
 
         return {
-            "vendor_searched": vendor_name, "opensecrets_entity_name": org_name,
-            "financial_totals": {
-                "total_pac_contributions": f"${summary.get('pac', '0')}",
-                "total_individual_contributions": f"${summary.get('indivs', '0')}",
-                "total_soft_money": f"${summary.get('soft', '0')}",
-                "total_receipts": f"${summary.get('total', '0')}"
+            "vendor_searched": vendor_name, 
+            "opensecrets_entity_name": org_name,
+            "patient_zero_year": genesis_year,
+            "latest_financial_totals": {
+                "total_pac_contributions": f"${latest_summary.get('pac', '0')}",
+                "total_individual_contributions": f"${latest_summary.get('indivs', '0')}",
+                "total_soft_money": f"${latest_summary.get('soft', '0')}",
+                "total_receipts": f"${latest_summary.get('total', '0')}"
             },
             "source_url": f"https://www.opensecrets.org/orgs/summary?id={org_id}"
         }
@@ -396,7 +446,8 @@ def api_sweep(
     cb: bool = True, 
     vl: bool = True, 
     og: bool = True, 
-    pdf: bool = True
+    pdf: bool = True,
+    auto_forensics: bool = True
 ):
     pipeline = RFPDataIngestion(toggles={"demandstar": ds, "centralbidding": cb, "vendorlink": vl, "opengov": og}, profile_name=type)
     pipeline.execute_pipeline()
@@ -410,6 +461,14 @@ def api_sweep(
         
     if state != "All":
         results = [b for b in results if b['state'].upper() == state.upper() or b['state'] == 'US']
+
+    # AUTOMATIC FORENSICS TRIGGER
+    if auto_forensics:
+        for b in results:
+            if b.get('friction_score', 0) > 0 and b.get('suspected_incumbent'):
+                logging.info(f"--> [AUTO-FORENSICS] Triggered for {b['suspected_incumbent']} at {b['agency']}...")
+                b['forensic_checkbook'] = query_municipal_checkbook(b['agency'], b['suspected_incumbent'])
+                b['forensic_opensecrets'] = query_opensecrets_api(b['suspected_incumbent'])
 
     if not results:
         return {"status": "No targets found for this configuration."}
@@ -494,7 +553,8 @@ def serve_dashboard():
                     <label><input type="checkbox" id="t_cb" checked> Central Bidding (BYOT)</label><br>
                     <label><input type="checkbox" id="t_vl" checked> VendorLink (BYOT)</label><br>
                     <label><input type="checkbox" id="t_og" checked> OpenGov (Historical / Free)</label><br>
-                    <label><input type="checkbox" id="t_pdf" checked> Deep PDF Inspection</label>
+                    <label><input type="checkbox" id="t_pdf" checked> Deep PDF Inspection</label><br>
+                    <label><input type="checkbox" id="t_auto" checked> <strong>Auto-Trigger Forensics (API Heavy)</strong></label>
                 </div>
 
                 <button onclick="runSweep()">Initialize Dragnet</button>
@@ -538,9 +598,10 @@ def serve_dashboard():
                 const vl = document.getElementById('t_vl').checked;
                 const og = document.getElementById('t_og').checked;
                 const pdf = document.getElementById('t_pdf').checked;
+                const auto = document.getElementById('t_auto').checked;
 
                 try {
-                    const response = await fetch(`/api/sweep?keyword=${kw}&type=${type}&state=${state}&days=${days}&ds=${ds}&cb=${cb}&vl=${vl}&og=${og}&pdf=${pdf}`);
+                    const response = await fetch(`/api/sweep?keyword=${kw}&type=${type}&state=${state}&days=${days}&ds=${ds}&cb=${cb}&vl=${vl}&og=${og}&pdf=${pdf}&auto_forensics=${auto}`);
                     document.getElementById('output').innerText = JSON.stringify(await response.json(), null, 2);
                 } catch (err) { document.getElementById('output').innerText = 'Error: ' + err; }
                 document.getElementById('sweepStatus').style.display = 'none';
@@ -548,7 +609,7 @@ def serve_dashboard():
 
             async function runCheckbook() {
                 document.getElementById('cbStatus').style.display = 'block';
-                document.getElementById('output').innerText = 'Initializing SerpApi OSINT Protocol...';
+                document.getElementById('output').innerText = 'Initializing Serper OSINT Protocol...';
                 try {
                     const response = await fetch('/api/checkbook?agency=' + encodeURIComponent(document.getElementById('cbAgency').value) + '&vendor=' + encodeURIComponent(document.getElementById('cbVendor').value));
                     document.getElementById('output').innerText = JSON.stringify(await response.json(), null, 2);
@@ -558,7 +619,7 @@ def serve_dashboard():
 
             async function runOpenSecrets() {
                 document.getElementById('osStatus').style.display = 'block';
-                document.getElementById('output').innerText = 'Accessing OpenSecrets Disclosure Database...';
+                document.getElementById('output').innerText = 'Tracing Historical PAC Contributions...';
                 try {
                     const response = await fetch('/api/opensecrets?vendor=' + encodeURIComponent(document.getElementById('osVendor').value));
                     document.getElementById('output').innerText = JSON.stringify(await response.json(), null, 2);
