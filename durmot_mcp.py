@@ -12,7 +12,7 @@ from curl_cffi import requests as tls_requests
 # FastMCP SDK
 from fastmcp import FastMCP
 
-# OPSEC CRITICAL: All logs must go to stderr. 
+# OPSEC CRITICAL: All logs must go to stderr so they appear in Railway's Deploy Logs.
 logging.basicConfig(
     level=logging.INFO, 
     format='%(asctime)s - %(levelname)s - %(message)s',
@@ -30,11 +30,14 @@ class RFPDataIngestion:
         self.rfp_master_list = []
 
     def intercept_demandstar_xhr(self):
-        logging.info("Intercepting Primary Nodes (Nationwide DemandStar)...")
+        logging.info("--> [DemandStar] Intercepting Primary Nodes...")
         url = "https://api.demandstar.com/contents/content/v1/bids/search"
         raw_token = os.environ.get("DEMANDSTAR_TOKEN", "")
         auth_token = re.sub(r'[\r\n]+', '', raw_token).strip()
         
+        if not auth_token:
+            logging.warning("--> [DemandStar] WARNING: DEMANDSTAR_TOKEN is not set in environment variables!")
+
         headers = {
             "accept": "application/json",
             "content-type": "application/json",
@@ -50,6 +53,7 @@ class RFPDataIngestion:
                 headers["authorization"] = auth_token if auth_token.startswith("Bearer ") else f"Bearer {auth_token}"
 
         search_terms = ["software", "erp", "system", "technology", "billing", "implementation", "cloud"]
+        total_ingested = 0
         
         for term in search_terms:
             payload = {
@@ -64,9 +68,12 @@ class RFPDataIngestion:
             }
             try:
                 response = tls_requests.post(url, headers=headers, json=payload, impersonate="chrome120", timeout=12)
+                logging.info(f"--> [DemandStar] Query '{term}' returned HTTP {response.status_code}")
+                
                 if response.status_code == 200:
                     data = response.json()
                     bids = data.get('result', []) if isinstance(data, dict) else data
+                    logging.info(f"--> [DemandStar] Found {len(bids)} raw bids for '{term}'")
                     for item in bids:
                         raw_state = item.get('state') or item.get('agencyState') or item.get('broadcastState') or 'US'
                         self.rfp_master_list.append({
@@ -78,11 +85,16 @@ class RFPDataIngestion:
                             "raw_metadata": item,
                             "url": f"https://www.demandstar.com/app/bids/{item.get('bidId', '')}"
                         })
-            except Exception:
-                pass
+                        total_ingested += 1
+                else:
+                    logging.error(f"--> [DemandStar] Auth/Request Failure ({response.status_code}): {response.text[:200]}")
+            except Exception as e:
+                logging.error(f"--> [DemandStar] Connection error on '{term}': {e}")
+                
+        logging.info(f"--> [DemandStar] Total bids collected: {total_ingested}")
 
     def bypass_opengov_api(self):
-        logging.info("Intercepting Secondary Nodes (OpenGov Portals)...")
+        logging.info("--> [OpenGov] Intercepting Secondary Nodes...")
         florida_portals = ["orlando", "citrusfl", "cityofgainesville"]
         headers = {
             "accept": "application/json, text/plain, */*",
@@ -90,6 +102,7 @@ class RFPDataIngestion:
             "user-agent": "Mozilla/5.0"
         }
         
+        total_opengov = 0
         for portal in florida_portals:
             url = f"https://api.procurement.opengov.com/api/v1/government/{portal}/project/public"
             payload = {"filters": [{"type": "status", "value": "active"}], "limit": 50, "page": 1}
@@ -98,6 +111,7 @@ class RFPDataIngestion:
                 if response.status_code == 200:
                     data = response.json()
                     projects = data.get('data', []) if isinstance(data, dict) else data
+                    logging.info(f"--> [OpenGov] Portal '{portal}' returned {len(projects)} active projects")
                     for item in projects:
                         self.rfp_master_list.append({
                             "source": "OpenGov", 
@@ -108,12 +122,18 @@ class RFPDataIngestion:
                             "raw_metadata": item,
                             "url": f"https://procurement.opengov.com/portal/{portal}/projects/{item.get('id')}" if item.get('id') else ""
                         })
-            except Exception:
-                pass
+                        total_opengov += 1
+                else:
+                    logging.warning(f"--> [OpenGov] Portal '{portal}' returned HTTP {response.status_code}")
+            except Exception as e:
+                logging.error(f"--> [OpenGov] Error fetching '{portal}': {e}")
+                
+        logging.info(f"--> [OpenGov] Total projects collected: {total_opengov}")
 
     def execute_pipeline(self):
         self.intercept_demandstar_xhr()
         self.bypass_opengov_api()
+        logging.info(f"--> [Master List] Total raw records aggregated: {len(self.rfp_master_list)}")
 
 class DurmotIntelligence:
     def __init__(self):
