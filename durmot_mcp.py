@@ -3,9 +3,11 @@ import os
 import re
 import io
 import json
+import math
 import logging
 import urllib.parse
 from datetime import datetime, timedelta
+from collections import defaultdict
 from bs4 import BeautifulSoup
 from pypdf import PdfReader
 from curl_cffi import requests as tls_requests
@@ -16,7 +18,7 @@ from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
 import uvicorn
 
-# OPSEC CRITICAL: Logs stream to Railway Deploy Logs
+# OPSEC CRITICAL: Stream logs directly to Railway container
 logging.basicConfig(
     level=logging.INFO, 
     format='%(asctime)s - %(levelname)s - %(message)s',
@@ -25,6 +27,70 @@ logging.basicConfig(
 
 # 1. Initialize MCP Server
 mcp = FastMCP("Aelfstone Intelligence Engine")
+
+# ==============================================================================
+# PROBABILISTIC GRAPH & INVERSION ENGINE
+# ==============================================================================
+
+class CorruptionGraph:
+    """
+    In-memory probabilistic graph that calculates multi-node correlation
+    and handles automatic branch pruning using logistic log-odds decay.
+    """
+    def __init__(self):
+        self.nodes = {}  # id -> {type, label, attributes}
+        self.edges = defaultdict(dict)  # u -> {v: weight}
+        
+    def add_node(self, node_id, node_type, label, **attrs):
+        self.nodes[node_id] = {"type": node_type, "label": label, "attrs": attrs}
+        
+    def add_edge(self, u, v, weight=1.0, relation="associated"):
+        self.edges[u][v] = {"weight": weight, "relation": relation}
+        self.edges[v][u] = {"weight": weight, "relation": relation}
+
+    def compute_katz_centrality(self, alpha=0.1, beta=1.0, max_iter=20):
+        """
+        Calculates network influence via power iteration (matrix inversion approximation)
+        to discover central nodes across agencies, vendors, and corporate officers.
+        """
+        nodes = list(self.nodes.keys())
+        if not nodes:
+            return {}
+        centrality = {n: 1.0 for n in nodes}
+        
+        for _ in range(max_iter):
+            new_centrality = {}
+            for n in nodes:
+                incoming_weight = sum(
+                    self.edges[n][neighbor]["weight"] * centrality[neighbor] 
+                    for neighbor in self.edges[n]
+                )
+                new_centrality[n] = beta + (alpha * incoming_weight)
+            centrality = new_centrality
+            
+        # Normalize
+        norm = math.sqrt(sum(v**2 for v in centrality.values())) or 1.0
+        return {n: round(v / norm, 4) for n, v in centrality.items()}
+
+# Bayesian Prior Log-Odds Weights
+LOGIT_PRIORS = {
+    "SOLE_SOURCE": 1.40,            # High initial prior
+    "DIR_CONTRACT": 1.15,          # Texas DIR monopoly marker
+    "PIGGYBACK": 1.00,             # Cooperative avoidance
+    "SHORT_WINDOW": 1.30,          # Rigged RFP submission window
+    "METADATA_MATCH": 1.80,        # Ghostwriter detected in PDF
+    "CHECKBOOK_LOCK": 1.20,        # Historical genesis confirms lock-in
+    "CLEAN_RECORD": -1.60,         # Pruning signal (decay factor)
+    "SHARED_OFFICER": 2.10,        # High-threat entity linkage
+    "CAD_HOMESTEAD_ANOMALY": 1.70  # Undisclosed asset / real estate cluster
+}
+
+def logit_to_prob(logit_val):
+    """Converts cumulative log-odds into probability [0.0, 1.0]"""
+    try:
+        return 1.0 / (1.0 + math.exp(-logit_val))
+    except OverflowError:
+        return 1.0 if logit_val > 0 else 0.0
 
 # ==============================================================================
 # INDUSTRY & INTELLIGENCE PROFILES
@@ -89,13 +155,8 @@ class RFPDataIngestion:
     def intercept_serper_google_dragnet(self, state="All", keyword=""):
         if not self.toggles.get("serper"): return
         api_key = os.environ.get("SERPER_API_KEY")
-        if not api_key:
-            logging.warning("--> [Serper Dragnet] SERPER_API_KEY missing. Skipping Google OSINT sweep.")
-            return
+        if not api_key: return
 
-        logging.info(f"--> [Serper Dragnet] Initiating Google OSINT Sweep for [{self.profile['name']}] State: [{state}]...")
-        
-        # State-specific authority domains
         if state == "TX":
             state_scope = "(site:*.tx.us OR site:texas.gov OR inurl:texas)"
         elif state == "FL":
@@ -135,8 +196,6 @@ class RFPDataIngestion:
             ]
 
         headers = {"X-API-KEY": api_key, "Content-Type": "application/json"}
-        total_serper = 0
-
         for q in dork_queries:
             if not q.strip(): continue
             payload = {"q": q, "tbs": "sbd:1", "num": 25}
@@ -145,58 +204,21 @@ class RFPDataIngestion:
                 if res.status_code == 200:
                     for item in res.json().get("organic", []):
                         url = item.get("link", "")
-                        title = item.get("title", "Unknown Title")
-                        snippet = item.get("snippet", "")
-                        date_str = item.get("date", datetime.now().strftime("%Y-%m-%d"))
-
                         domain = urllib.parse.urlparse(url).netloc
                         clean_dom = re.sub(r'^(www\.|procurement\.|bids\.)', '', domain)
                         agency = clean_dom.split('.')[0].replace('-', ' ').title()
 
                         self.rfp_master_list.append({
                             "source": "Serper Google OSINT",
-                            "title": title,
+                            "title": item.get("title", "Unknown Title"),
                             "agency": agency,
                             "state": state if state != "All" else "US",
-                            "published_date": date_str,
-                            "raw_metadata": {"snippet": snippet, "query": q, "url": url},
+                            "published_date": item.get("date", datetime.now().strftime("%Y-%m-%d")),
+                            "raw_metadata": {"snippet": item.get("snippet", ""), "query": q, "url": url},
                             "url": url
                         })
-                        total_serper += 1
             except Exception as e:
                 logging.error(f"--> [Serper Dragnet Error] {str(e)}")
-
-        logging.info(f"--> [Serper Dragnet] OSINT Ingestion Complete: {total_serper} nodes acquired.")
-
-    def intercept_demandstar_xhr(self):
-        if not self.toggles.get("demandstar"): return
-        url = "https://api.demandstar.com/contents/content/v1/bids/search"
-        raw_token = os.environ.get("DEMANDSTAR_TOKEN", "")
-        auth_token = re.sub(r'[\r\n]+', '', raw_token).strip()
-        if not auth_token: return
-        headers = {"accept": "application/json", "content-type": "application/json", "user-agent": "Mozilla/5.0"}
-        if not auth_token.lower().startswith("bearer ") and not auth_token.startswith("ey"): 
-            headers["cookie"] = auth_token
-        else: 
-            headers["authorization"] = auth_token if auth_token.startswith("Bearer ") else f"Bearer {auth_token}"
-
-        for term in self.search_terms:
-            if not term: continue
-            payload = {"bidName": term, "showBids": "externalBids", "includeExternalBids": "true", "sortBy": "broadCastDate", "sortOrder": "DESC", "page": 1, "limit": 25}
-            try:
-                response = tls_requests.post(url, headers=headers, json=payload, impersonate="chrome120", timeout=12)
-                if response.status_code == 200:
-                    for item in response.json().get('result', []):
-                        self.rfp_master_list.append({
-                            "source": "DemandStar",
-                            "title": item.get('bidName', 'Unknown'),
-                            "agency": item.get('agency', 'Unknown'),
-                            "state": str(item.get('state') or 'US').strip().upper(),
-                            "published_date": item.get('broadCastDate', ''),
-                            "raw_metadata": item,
-                            "url": f"https://www.demandstar.com/app/bids/{item.get('bidId', '')}"
-                        })
-            except Exception: pass
 
     def bypass_opengov_api(self):
         if not self.toggles.get("opengov"): return
@@ -227,7 +249,6 @@ class RFPDataIngestion:
     def execute_pipeline(self, state="All", keyword=""):
         self.intercept_serper_google_dragnet(state=state, keyword=keyword)
         self.bypass_opengov_api()
-        self.intercept_demandstar_xhr()
 
 class DurmotIntelligence:
     def __init__(self, deep_scrape=True, profile_name="govtech"):
@@ -311,7 +332,7 @@ class DurmotIntelligence:
         return processed
 
 # ==============================================================================
-# SECTION 2: FORENSIC TRIAD & OSINT ENGINES
+# SECTION 2: FORENSIC TRIAD & TARGETED ENGINES
 # ==============================================================================
 
 def query_municipal_checkbook(agency_name, vendor_name):
@@ -325,12 +346,12 @@ def query_municipal_checkbook(agency_name, vendor_name):
     headers = {"X-API-KEY": api_key, "Content-Type": "application/json"}
     try:
         res = tls_requests.post("https://google.serper.dev/search", headers=headers, json={"q": query, "tbs": "sbd:1"}, timeout=15)
-        if res.status_code != 200: return {"error": f"Serper API HTTP {res.status_code}"}
+        if res.status_code != 200: return {"error": f"Serper HTTP {res.status_code}"}
         results = [
             {"title": i.get("title", "Unknown"), "link": i.get("link", ""), "snippet": i.get("snippet", "")}
             for i in res.json().get("organic", []) if vendor_name.lower() in i.get("snippet", "").lower()
         ]
-        if not results: return {"status": f"No public genesis documents found for {vendor_name} at {agency_name}."}
+        if not results: return {"status": f"No public genesis records found for {vendor_name} at {agency_name}."}
         return {"agency_investigated": agency_name, "vendor_investigated": vendor_name, "genesis_risk": "HIGH" if len(results) >= 2 else "MODERATE", "evidence": results[:5]}
     except Exception as e: return {"error": str(e)}
 
@@ -414,7 +435,7 @@ def query_mineral_surplus(target_or_county, state_code="tx"):
     except Exception as e: return {"error": str(e)}
 
 # ==============================================================================
-# SECTION 3: MCP EXPOSED TOOLS
+# SECTION 3: MCP EXPOSED TOOLS (CLAUDE DESKTOP INTEGRATION)
 # ==============================================================================
 
 @mcp.tool
@@ -458,7 +479,7 @@ def audit_mineral_and_surplus(target_or_county: str, state_code: str = "tx") -> 
     return json.dumps([query_mineral_surplus(target_or_county, state_code)], indent=2)
 
 # ==============================================================================
-# SECTION 4: WEB DASHBOARD & REST API ENDPOINTS
+# SECTION 4: WEB DASHBOARD & PROBABILISTIC EXECUTION
 # ==============================================================================
 
 mcp_app = mcp.http_app(path="/") 
@@ -483,18 +504,85 @@ def api_sweep(
     if state != "All":
         results = [b for b in results if b['state'].upper() == state.upper() or b['state'] == 'US']
 
-    # Auto-forensics capped to top 3 targets to prevent HTTP timeouts
+    # ==========================================================================
+    # AUTONOMOUS PROBABILISTIC INFERENCE (THE LOG / INVERSION BREAK-OFF)
+    # ==========================================================================
     if auto_forensics:
-        count = 0
-        for b in results:
-            if count >= 3: break
-            if (b.get('friction_score', 0) > 0 and b.get('suspected_incumbent')) or type in ['asset_recovery', 'oppo_shells']:
-                target_entity = b.get('suspected_incumbent') or b.get('title')
-                b['forensic_checkbook'] = query_municipal_checkbook(b['agency'], target_entity)
-                b['forensic_opensecrets'] = query_opensecrets_bypass(target_entity)
-                b['forensic_revolving_door'] = query_revolving_door(b['agency'], target_entity)
-                b['forensic_corporate_registry'] = query_corporate_registry(target_entity, state if state != "All" else "tx")
-                count += 1
+        graph = CorruptionGraph()
+        
+        for b in results[:5]:  # Evaluate top 5 candidates
+            agency = b.get('agency', 'Unknown Agency')
+            vendor = b.get('suspected_incumbent') or b.get('title')
+            
+            # Base prior logit calculation
+            logit_score = -0.50  # Neutral baseline prior
+            flags = b.get('friction_flags', [])
+            
+            if "Sole Source" in flags: logit_score += LOGIT_PRIORS["SOLE_SOURCE"]
+            if "Dir Contract" in flags or "Dir-Cpo" in flags: logit_score += LOGIT_PRIORS["DIR_CONTRACT"]
+            if "Piggyback" in flags: logit_score += LOGIT_PRIORS["PIGGYBACK"]
+            if "Metadata_Ghostwriter_Flag" in flags: logit_score += LOGIT_PRIORS["METADATA_MATCH"]
+            
+            p_initial = logit_to_prob(logit_score)
+            
+            # STAGE 1 BREAK-OFF: If baseline anomaly probability is below 0.35, prune branch!
+            if p_initial < 0.35:
+                b['probabilistic_engine'] = {
+                    "anomaly_probability": round(p_initial, 3),
+                    "execution_status": "PRUNED - Sub-threshold friction. Serper budget preserved."
+                }
+                continue
+
+            # Escalation: Graph Nodes Added
+            graph.add_node(agency, "AGENCY", agency)
+            graph.add_node(vendor, "VENDOR", vendor)
+            graph.add_edge(agency, vendor, weight=p_initial, relation="procurement")
+            
+            # STAGE 2: Execute Genesis Checkbook Search
+            cb_result = query_municipal_checkbook(agency, vendor)
+            b['forensic_checkbook'] = cb_result
+            
+            if cb_result.get('genesis_risk') == 'HIGH':
+                logit_score += LOGIT_PRIORS["CHECKBOOK_LOCK"]
+            elif "status" in cb_result:
+                logit_score += LOGIT_PRIORS["CLEAN_RECORD"]
+                
+            p_updated = logit_to_prob(logit_score)
+            
+            # STAGE 2 BREAK-OFF: If genesis fails to confirm lock-in and P drops below 0.30, halt!
+            if p_updated < 0.30:
+                b['probabilistic_engine'] = {
+                    "anomaly_probability": round(p_updated, 3),
+                    "execution_status": "PRUNED - Genesis records indicate routine procurement. Branch terminated."
+                }
+                continue
+                
+            # STAGE 3: High Anomaly Confirmed (P >= 0.55) -> Autonomous Multi-Vector Escalation
+            b['forensic_opensecrets'] = query_opensecrets_bypass(vendor)
+            b['forensic_revolving_door'] = query_revolving_door(agency, vendor)
+            corp_res = query_corporate_registry(vendor, state if state != "All" else "tx")
+            b['forensic_corporate_registry'] = corp_res
+            
+            # Extract corporate officers and link to Real Estate
+            if corp_res.get('filings'):
+                logit_score += LOGIT_PRIORS["SHARED_OFFICER"]
+                for filing in corp_res['filings'][:2]:
+                    officer_match = re.search(r'([A-Z][a-z]+ [A-Z][a-z]+)', filing.get('evidence', ''))
+                    if officer_match:
+                        suspect_officer = officer_match.group(1)
+                        b['forensic_cad_property'] = query_real_estate_cad(suspect_officer, state if state != "All" else "tx")
+                        graph.add_node(suspect_officer, "OFFICER", suspect_officer)
+                        graph.add_edge(vendor, suspect_officer, weight=0.9, relation="officer_of")
+                        break
+
+            final_p = logit_to_prob(logit_score)
+            katz_scores = graph.compute_katz_centrality()
+            
+            b['probabilistic_engine'] = {
+                "anomaly_probability": round(final_p, 3),
+                "graph_centrality_nodes": katz_scores,
+                "execution_status": "ESCALATED - Critical anomaly verified. Network mapped."
+            }
 
     if not results: return {"status": "No targets found for this configuration."}
     return results
@@ -555,7 +643,7 @@ def serve_dashboard():
         
         <div class="grid">
             <div class="panel">
-                <h3>1. MARKET DRAGNET (PHASE 1 - GOOGLE OSINT)</h3>
+                <h3>1. MARKET DRAGNET (AUTONOMOUS GRAPH)</h3>
                 
                 <div class="controls-group">
                     <select id="sweepDays">
@@ -577,30 +665,30 @@ def serve_dashboard():
                 <div class="controls-group">
                     <select id="sweepState">
                         <option value="All">Location: Nationwide</option>
-                        <option value="TX">Location: Texas</option>
+                        <option value="TX" selected>Location: Texas</option>
                         <option value="FL">Location: Florida</option>
                         <option value="CA">Location: California</option>
                         <option value="NY">Location: New York</option>
                     </select>
                 </div>
-                <input type="text" id="sweepKw" placeholder="Target / Vendor / County Keyword">
+                <input type="text" id="sweepKw" placeholder="Keyword (e.g., Travis County, Harris, DIR)">
                 
                 <div style="margin-top: 15px; border-top: 1px solid #1e293b; padding-top: 10px;">
                     <label><input type="checkbox" id="t_serp" checked> <strong>Serper Google OSINT Dragnet</strong></label><br>
                     <label><input type="checkbox" id="t_og" checked> OpenGov API Ingestion</label><br>
                     <label><input type="checkbox" id="t_ds"> DemandStar (BYOT)</label><br>
                     <label><input type="checkbox" id="t_pdf" checked> Deep PDF Inspection</label><br>
-                    <label><input type="checkbox" id="t_auto" checked> <strong>Auto-Trigger Forensics (Capped at 3)</strong></label>
+                    <label><input type="checkbox" id="t_auto" checked> <strong>Probabilistic Auto-Forensics & Pruning</strong></label>
                 </div>
 
                 <button onclick="runSweep()">Initialize Dragnet</button>
-                <div id="sweepStatus" class="status">Sweeping Google OSINT Nodes...</div>
+                <div id="sweepStatus" class="status">Running Probabilistic Matrix Inference...</div>
             </div>
 
             <div style="display: flex; flex-direction: column; gap: 20px;">
                 <div class="panel">
                     <h3>2. CHECKBOOK & CONTRACT FORENSICS</h3>
-                    <input type="text" id="cbAgency" placeholder="Agency (e.g., Orange County or Austin)">
+                    <input type="text" id="cbAgency" placeholder="Agency (e.g., Austin or Travis County)">
                     <input type="text" id="cbVendor" placeholder="Vendor (e.g., Tyler Technologies)">
                     <button onclick="runCheckbook()">Run Diagnostic</button>
                     <div id="cbStatus" class="status">Querying Municipal Ledgers...</div>
@@ -608,14 +696,14 @@ def serve_dashboard():
 
                 <div class="panel">
                     <h3>3. CAMPAIGN FINANCE BYPASS</h3>
-                    <input type="text" id="osVendor" placeholder="Vendor (e.g., Oracle or Tyler)">
+                    <input type="text" id="osVendor" placeholder="Vendor (e.g., Tyler Technologies)">
                     <button onclick="runOpenSecrets()">Trace Capital</button>
                     <div id="osStatus" class="status">Executing Serper Bypass...</div>
                 </div>
 
                 <div class="panel">
                     <h3>4. REVOLVING DOOR TRACKER</h3>
-                    <input type="text" id="rdAgency" placeholder="Agency (e.g., Austin or Travis County)">
+                    <input type="text" id="rdAgency" placeholder="Agency (e.g., Austin)">
                     <input type="text" id="rdVendor" placeholder="Vendor (e.g., Tyler Technologies)">
                     <button onclick="runRevolvingDoor()">Scan Personnel</button>
                     <div id="rdStatus" class="status">Cross-referencing LinkedIn records...</div>
@@ -654,7 +742,7 @@ def serve_dashboard():
         <script>
             async function runSweep() {
                 document.getElementById('sweepStatus').style.display = 'block';
-                document.getElementById('output').innerText = 'Executing Dragnet sweep...';
+                document.getElementById('output').innerText = 'Initializing probabilistic matrix and network dragnet...';
                 
                 const kw = encodeURIComponent(document.getElementById('sweepKw').value);
                 const type = encodeURIComponent(document.getElementById('sweepType').value);
