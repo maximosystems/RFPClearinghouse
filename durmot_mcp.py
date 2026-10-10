@@ -34,7 +34,7 @@ INDUSTRY_PROFILES = {
         "search_terms": ["software", "erp", "system", "technology", "billing", "cloud"],
         "tech_stack": [r"\bsoftware\b", r"\berp\b", r"\butility billing\b", r"\bcrm\b", r"\btyler\b", r"\bmunis\b", r"\bcloud\b", r"\bsaas\b"],
         "disqualify": [r"\bwater treatment\b", r"\bpump station\b", r"\bsewer\b", r"\bdirectional boring\b", r"\bconcrete\b", r"\basphalt\b", r"\broofing\b"],
-        "vendors": ["Tyler Technologies", "CentralSquare", "Oracle", "Workday", "Munis", "CivicPlus"]
+        "vendors": ["Tyler Technologies", "CentralSquare", "Oracle", "Workday", "Munis", "CivicPlus", "Acta Solutions"]
     },
     "construction": {
         "search_terms": ["roofing", "asphalt", "concrete", "paving", "construction", "hvac", "renovation"],
@@ -88,13 +88,7 @@ class RFPDataIngestion:
                 "limit": 50
             }
             try:
-                response = tls_requests.post(
-                    url, 
-                    headers=headers, 
-                    json=payload, 
-                    impersonate="chrome120", 
-                    timeout=12
-                )
+                response = tls_requests.post(url, headers=headers, json=payload, impersonate="chrome120", timeout=12)
                 if response.status_code == 200:
                     bids = response.json().get('result', [])
                     for item in bids:
@@ -115,89 +109,40 @@ class RFPDataIngestion:
         if not self.toggles.get("centralbidding"): return
         raw_cookie = os.environ.get("CENTRALBIDDING_TOKEN", "")
         if not raw_cookie: return
-        headers = {
-            "accept": "application/json", 
-            "content-type": "application/json", 
-            "cookie": raw_cookie.strip(), 
-            "user-agent": "Mozilla/5.0"
-        }
+        headers = {"accept": "application/json", "content-type": "application/json", "cookie": raw_cookie.strip(), "user-agent": "Mozilla/5.0"}
         term = self.search_terms[0] if self.search_terms[0] else "bid"
         try: 
-            tls_requests.post(
-                "https://www.centralauctionhouse.com/DesktopModules/XModPro/Feed.aspx", 
-                headers=headers, 
-                data={"searchTerm": term}, 
-                impersonate="chrome120", 
-                timeout=12
-            )
+            tls_requests.post("https://www.centralauctionhouse.com/DesktopModules/XModPro/Feed.aspx", headers=headers, data={"searchTerm": term}, impersonate="chrome120", timeout=12)
         except Exception: pass
 
     def intercept_vendorlink_xhr(self):
         if not self.toggles.get("vendorlink"): return
         raw_token = os.environ.get("VENDORLINK_TOKEN", "")
         if not raw_token: return
-        
         auth_string = raw_token.strip() if raw_token.lower().startswith("bearer") else f"Bearer {raw_token.strip()}"
-        headers = {
-            "accept": "application/json", 
-            "content-type": "application/json", 
-            "authorization": auth_string, 
-            "user-agent": "Mozilla/5.0"
-        }
+        headers = {"accept": "application/json", "content-type": "application/json", "authorization": auth_string, "user-agent": "Mozilla/5.0"}
         term = self.search_terms[0] if self.search_terms[0] else "bid"
         try: 
-            tls_requests.post(
-                "https://api.myvendorlink.com/api/Search/Bids", 
-                headers=headers, 
-                json={"Keyword": term}, 
-                impersonate="chrome120", 
-                timeout=12
-            )
+            tls_requests.post("https://api.myvendorlink.com/api/Search/Bids", headers=headers, json={"Keyword": term}, impersonate="chrome120", timeout=12)
         except Exception: pass
 
     def bypass_opengov_api(self):
         if not self.toggles.get("opengov"): return
         logging.info("--> [OpenGov] Executing Sweeps on Active Portals...")
-        
-        national_portals = [
-            "orlando", "orangecountyfl", "citrusfl", "cityofgainesville", 
-            "leoncounty", "austintexas", "seattle", "phoenix"
-        ]
-        
+        national_portals = ["orlando", "orangecountyfl", "citrusfl", "cityofgainesville", "leoncounty", "austintexas", "seattle", "phoenix"]
         headers = {
-            "accept": "*/*", 
-            "content-type": "application/json",
-            "origin": "https://procurement.opengov.com", 
-            "referer": "https://procurement.opengov.com/",
-            "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            "accept": "*/*", "content-type": "application/json", "origin": "https://procurement.opengov.com", 
+            "referer": "https://procurement.opengov.com/", "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         }
         total_opengov = 0
-        
         for portal in national_portals:
             for status in ["open", "evaluation", "closed"]:
                 try:
                     url = f"https://api.procurement.opengov.com/api/v1/government/{portal}/project/public"
-                    payload = {
-                        "filters": [{"type": "status", "value": status}],
-                        "quickSearchQuery": None,
-                        "limit": 100,
-                        "page": 0, 
-                        "sortField": "title",
-                        "sortDirection": "ASC"
-                    }
-                    
-                    response = tls_requests.post(
-                        url, 
-                        headers=headers, 
-                        json=payload, 
-                        impersonate="chrome120", 
-                        timeout=5
-                    )
-                    
+                    payload = {"filters": [{"type": "status", "value": status}], "quickSearchQuery": None, "limit": 100, "page": 0, "sortField": "title", "sortDirection": "ASC"}
+                    response = tls_requests.post(url, headers=headers, json=payload, impersonate="chrome120", timeout=5)
                     if response.status_code == 200:
-                        json_resp = response.json()
-                        projects = json_resp.get('rows', [])
-                            
+                        projects = response.json().get('rows', [])
                         for item in projects:
                             self.rfp_master_list.append({
                                 "source": "OpenGov", 
@@ -209,9 +154,7 @@ class RFPDataIngestion:
                                 "url": f"https://procurement.opengov.com/portal/{portal}/projects/{item.get('id')}" if item.get('id') else ""
                             })
                             total_opengov += 1
-                except Exception as e: 
-                    logging.error(f"--> [DEBUG CRASH] Error hitting {portal}: {str(e)}")
-                    
+                except Exception as e: logging.error(f"--> [DEBUG CRASH] Error hitting {portal}: {str(e)}")
         logging.info(f"--> [OpenGov] National Sweep Complete. Bids collected: {total_opengov}")
 
     def execute_pipeline(self):
@@ -224,14 +167,16 @@ class DurmotIntelligence:
     def __init__(self, deep_scrape=True, profile_name="govtech"):
         self.deep_scrape = deep_scrape
         self.profile = INDUSTRY_PROFILES.get(profile_name, INDUSTRY_PROFILES["govtech"])
-        
         self.target_tech_stack = self.profile["tech_stack"]
         self.disqualify_keywords = self.profile["disqualify"]
         self.known_vendors = self.profile["vendors"]
         
         self.friction_heuristics = {
             r"\bsole source\b": 40, r"\bproprietary\b": 30, r"\bbrand name only\b": 35,
-            r"\bincumbent\b": 20, r"\bmandatory pre-bid\b": 25, r"\bno substitutions\b": 30
+            r"\bincumbent\b": 20, r"\bmandatory pre-bid\b": 25, r"\bno substitutions\b": 30,
+            r"\bpiggyback\b": 35, r"\bcooperative purchasing\b": 35, r"\bsourcewell\b": 30,
+            r"\bomnia partners\b": 30, r"\bnaspo\b": 30,
+            r"METADATA_GHOSTWRITER_FLAG": 50
         }
 
     def scrape_deep_text(self, url):
@@ -241,7 +186,19 @@ class DurmotIntelligence:
             if res.status_code == 200:
                 if url.lower().endswith('.pdf') or 'application/pdf' in res.headers.get('Content-Type', '').lower():
                     reader = PdfReader(io.BytesIO(res.content))
-                    return " ".join([page.extract_text() for page in reader.pages[:8] if page.extract_text()]).lower()
+                    
+                    # --- METADATA FORENSICS INJECTION ---
+                    hidden_text = ""
+                    meta = reader.metadata
+                    if meta:
+                        author_data = f"{meta.get('/Author', '')} {meta.get('/Creator', '')}".lower()
+                        if any(v.lower() in author_data for v in self.known_vendors):
+                            hidden_text = "METADATA_GHOSTWRITER_FLAG "
+                    # ------------------------------------
+                    
+                    pdf_text = " ".join([page.extract_text() for page in reader.pages[:8] if page.extract_text()]).lower()
+                    return hidden_text + pdf_text
+                
                 return BeautifulSoup(res.text, 'html.parser').get_text(separator=' ', strip=True).lower()
         except Exception: pass
         return ""
@@ -249,33 +206,26 @@ class DurmotIntelligence:
     def process_results(self, rfp_list, days=0):
         unique_rfps = {item['url']: item for item in rfp_list}.values()
         processed = []
-        
         cutoff_date = datetime.now() - timedelta(days=days) if days > 0 else None
 
         for raw_rfp in unique_rfps:
             if cutoff_date and raw_rfp.get('published_date'):
                 date_str = str(raw_rfp['published_date'])
                 pub_date = None
-                
                 match_iso = re.search(r'(\d{4}-\d{2}-\d{2})', date_str)
                 match_us = re.search(r'(\d{1,2})[-/](\d{1,2})[-/](\d{4})', date_str)
-                
                 if match_iso:
                     try: pub_date = datetime.strptime(match_iso.group(1), "%Y-%m-%d")
                     except: pass
                 elif match_us:
                     try: pub_date = datetime.strptime(f"{match_us.group(3)}-{match_us.group(1).zfill(2)}-{match_us.group(2).zfill(2)}", "%Y-%m-%d")
                     except: pass
-                    
-                if pub_date and pub_date < cutoff_date:
-                    continue
+                if pub_date and pub_date < cutoff_date: continue
 
             base_text = f"{raw_rfp['title']} {raw_rfp['agency']} {json.dumps(raw_rfp['raw_metadata'])}".lower()
-            
             stack_matches = [kw.replace(r"\b", "").strip().upper() for kw in self.target_tech_stack if kw != r"." and re.search(kw, base_text)]
             if not stack_matches and self.target_tech_stack[0] != r".":
-                if not any(re.search(kw, base_text) for kw in self.target_tech_stack):
-                    continue
+                if not any(re.search(kw, base_text) for kw in self.target_tech_stack): continue
 
             search_text = f"{base_text} {self.scrape_deep_text(raw_rfp.get('url', ''))}"
             if any(re.search(pat, search_text) for pat in self.disqualify_keywords): continue
@@ -302,21 +252,15 @@ class DurmotIntelligence:
 
 def query_municipal_checkbook(agency_name, vendor_name):
     api_key = os.environ.get("SERPER_API_KEY")
-    if not api_key: return {"error": "SERPER_API_KEY is missing. Get a free one at serper.dev"}
+    if not api_key: return {"error": "SERPER_API_KEY is missing."}
     
-    # Hunting for the Genesis documents instead of just change orders
-    query = f'"{vendor_name}" "{agency_name}" "Initial Award" OR "Notice of Intent" OR "Contract Award"'
-    
-    headers = {
-        "X-API-KEY": api_key,
-        "Content-Type": "application/json"
-    }
-    
-    # Using Google's 'tbs=sbd:1' (Sort by Date) to try to surface historical genesis documents
-    payload = {
-        "q": query,
-        "tbs": "sbd:1"
-    }
+    query = (
+        f'"{vendor_name}" "{agency_name}" '
+        f'("Initial Award" OR "Notice of Intent" OR "Contract Award" OR "piggyback" OR "cooperative purchasing" OR "rider agreement") '
+        f'-site:indeed.com -site:glassdoor.com -inurl:job -inurl:careers'
+    )
+    headers = {"X-API-KEY": api_key, "Content-Type": "application/json"}
+    payload = {"q": query, "tbs": "sbd:1"}
     
     try:
         res = tls_requests.post("https://google.serper.dev/search", headers=headers, json=payload, timeout=15)
@@ -324,80 +268,67 @@ def query_municipal_checkbook(agency_name, vendor_name):
         
         results = [
             {"title": i.get("title", "Unknown"), "link": i.get("link", ""), "snippet": i.get("snippet", "")}
-            for i in res.json().get("organic", [])
-            if vendor_name.lower() in i.get("snippet", "").lower()
+            for i in res.json().get("organic", []) if vendor_name.lower() in i.get("snippet", "").lower()
         ]
         if not results: return {"status": f"No public genesis documents found for {vendor_name} at {agency_name}."}
         
         return {
-            "agency_investigated": agency_name, 
-            "vendor_investigated": vendor_name, 
-            "genesis_risk": "HIGH" if len(results) >= 2 else "MODERATE", 
-            "evidence": results[:5]
+            "agency_investigated": agency_name, "vendor_investigated": vendor_name, 
+            "genesis_risk": "HIGH" if len(results) >= 2 else "MODERATE", "evidence": results[:5]
         }
     except Exception as e: return {"error": str(e)}
 
-def query_opensecrets_api(vendor_name):
-    api_key = os.environ.get("OPENSECRETS_API_KEY")
-    if not api_key: return {"error": "OPENSECRETS_API_KEY environment variable is not set."}
+def query_opensecrets_bypass(vendor_name):
+    """Bypasses the OpenSecrets API waitlist by using Serper to scrape their public profile index"""
+    api_key = os.environ.get("SERPER_API_KEY")
+    if not api_key: return {"error": "SERPER_API_KEY is missing."}
 
+    query = f'"{vendor_name}" contributions lobbying site:opensecrets.org/orgs/summary'
+    headers = {"X-API-KEY": api_key, "Content-Type": "application/json"}
+    
     try:
-        # 1. Grab the Organization ID
-        org_search_url = f"http://www.opensecrets.org/api/?method=getOrgs&org={urllib.parse.quote(vendor_name)}&apikey={api_key}&output=json"
-        res = tls_requests.get(org_search_url, timeout=10)
-        if res.status_code != 200: return {"error": f"OpenSecrets API returned status {res.status_code}"}
+        res = tls_requests.post("https://google.serper.dev/search", headers=headers, json={"q": query}, timeout=15)
+        if res.status_code != 200: return {"error": f"Serper HTTP {res.status_code}"}
             
-        orgs = res.json().get('response', {}).get('organization', [])
-        if not orgs: return {"status": f"No profile found for '{vendor_name}'."}
-        if isinstance(orgs, dict): orgs = [orgs]
+        results = res.json().get("organic", [])
+        if not results: return {"status": f"No OpenSecrets profile indexed for '{vendor_name}'."}
 
-        org_id = orgs[0].get('@attributes', {}).get('orgid')
-        org_name = orgs[0].get('@attributes', {}).get('orgname')
-        if not org_id: return {"error": "Failed to extract Organization ID."}
-
-        # 2. Time Machine Loop: Step backward by 2-year election cycles to find Patient Zero
-        current_year = datetime.now().year
-        start_cycle = current_year if current_year % 2 == 0 else current_year + 1
-        
-        genesis_year = "Unknown"
-        latest_summary = None
-        
-        for cycle in range(start_cycle, 1996, -2):
-            summary_url = f"http://www.opensecrets.org/api/?method=orgSummary&id={org_id}&cycle={cycle}&apikey={api_key}&output=json"
-            summary_res = tls_requests.get(summary_url, timeout=10)
-            
-            if summary_res.status_code != 200: break
-            
-            try:
-                summary = summary_res.json().get('response', {}).get('organization', {}).get('@attributes', {})
-                total_receipts = float(summary.get('total', '0'))
-            except:
-                break
-                
-            if total_receipts > 0:
-                genesis_year = str(cycle)
-                if not latest_summary:
-                    latest_summary = summary
-            else:
-                # Dropped to 0, the previous loop was the true genesis year
-                break
-
-        if not latest_summary:
-            return {"status": f"No financial history found for '{vendor_name}'."}
-
+        top_hit = results[0]
         return {
             "vendor_searched": vendor_name, 
-            "opensecrets_entity_name": org_name,
-            "patient_zero_year": genesis_year,
-            "latest_financial_totals": {
-                "total_pac_contributions": f"${latest_summary.get('pac', '0')}",
-                "total_individual_contributions": f"${latest_summary.get('indivs', '0')}",
-                "total_soft_money": f"${latest_summary.get('soft', '0')}",
-                "total_receipts": f"${latest_summary.get('total', '0')}"
-            },
-            "source_url": f"https://www.opensecrets.org/orgs/summary?id={org_id}"
+            "opensecrets_url": top_hit.get("link", ""),
+            "financial_snippet": top_hit.get("snippet", ""),
+            "status": "API Bypass Executed via Serper.dev"
         }
-    except Exception as e: return {"error": f"API request failed: {str(e)}"}
+    except Exception as e: return {"error": str(e)}
+
+def query_revolving_door(agency_name, vendor_name):
+    """Executes a LinkedIn Dork to find officials listing both the agency and vendor on their resume"""
+    api_key = os.environ.get("SERPER_API_KEY")
+    if not api_key: return {"error": "SERPER_API_KEY is missing."}
+    
+    query = f'"{vendor_name}" "{agency_name}" site:linkedin.com/in'
+    headers = {"X-API-KEY": api_key, "Content-Type": "application/json"}
+    payload = {"q": query}
+    
+    try:
+        res = tls_requests.post("https://google.serper.dev/search", headers=headers, json=payload, timeout=15)
+        if res.status_code != 200: return {"error": f"Serper API HTTP {res.status_code}"}
+        
+        results = []
+        for i in res.json().get("organic", []):
+            snippet = i.get("snippet", "")
+            title = i.get("title", "").split("-")[0].strip()
+            if vendor_name.lower() in snippet.lower() or agency_name.lower() in snippet.lower():
+                results.append({"suspect_name": title, "linkedin_url": i.get("link", ""), "evidence_snippet": snippet})
+
+        if not results: return {"status": f"No obvious revolving door profiles found for {vendor_name} at {agency_name}."}
+        
+        return {
+            "agency_investigated": agency_name, "vendor_investigated": vendor_name, 
+            "revolving_door_risk": "HIGH" if len(results) >= 1 else "LOW", "profiles_found": results[:5]
+        }
+    except Exception as e: return {"error": str(e)}
 
 # ==============================================================================
 # SECTION 3: MCP EXPOSED TOOLS (FOR GOD MODE / CLAUDE DESKTOP)
@@ -407,8 +338,7 @@ def query_opensecrets_api(vendor_name):
 def get_all_nationwide_rfps(days: int = 0) -> str:
     pipeline = RFPDataIngestion()
     pipeline.execute_pipeline()
-    results = DurmotIntelligence().process_results(pipeline.rfp_master_list, days=days)
-    return json.dumps(results if results else {"status": "No RFPs found today."}, indent=2)
+    return json.dumps(DurmotIntelligence().process_results(pipeline.rfp_master_list, days=days), indent=2)
 
 @mcp.tool
 def run_friction_audit(keyword: str = "", days: int = 0) -> str:
@@ -416,17 +346,21 @@ def run_friction_audit(keyword: str = "", days: int = 0) -> str:
     pipeline.execute_pipeline()
     results = DurmotIntelligence().process_results(pipeline.rfp_master_list, days=days)
     clean_kw = keyword.strip().lower()
-    if not clean_kw or clean_kw in ["all", "*"]: return json.dumps(results if results else {"status": "No active bids found."}, indent=2)
+    if not clean_kw or clean_kw in ["all", "*"]: return json.dumps(results, indent=2)
     filtered = [b for b in results if clean_kw in b['agency'].lower() or clean_kw in b['title'].lower()]
     return json.dumps(filtered if filtered else {"status": f"No bids matching '{keyword}'."}, indent=2)
 
 @mcp.tool
 def audit_vendor_lobbying(vendor_name: str) -> str:
-    return json.dumps([query_opensecrets_api(vendor_name)], indent=2)
+    return json.dumps([query_opensecrets_bypass(vendor_name)], indent=2)
 
 @mcp.tool
 def audit_vendor_checkbook(agency_name: str, vendor_name: str) -> str:
     return json.dumps([query_municipal_checkbook(agency_name, vendor_name)], indent=2)
+
+@mcp.tool
+def audit_revolving_door(agency_name: str, vendor_name: str) -> str:
+    return json.dumps([query_revolving_door(agency_name, vendor_name)], indent=2)
 
 # ==============================================================================
 # SECTION 4: WEB DASHBOARD & REST API ENDPOINTS
@@ -438,22 +372,13 @@ app.mount("/mcp", mcp_app)
 
 @app.get("/api/sweep")
 def api_sweep(
-    keyword: str = "", 
-    state: str = "All", 
-    type: str = "govtech", 
-    days: int = 0, 
-    ds: bool = True, 
-    cb: bool = True, 
-    vl: bool = True, 
-    og: bool = True, 
-    pdf: bool = True,
-    auto_forensics: bool = True
+    keyword: str = "", state: str = "All", type: str = "govtech", days: int = 0, 
+    ds: bool = True, cb: bool = True, vl: bool = True, og: bool = True, pdf: bool = True, auto_forensics: bool = True
 ):
     pipeline = RFPDataIngestion(toggles={"demandstar": ds, "centralbidding": cb, "vendorlink": vl, "opengov": og}, profile_name=type)
     pipeline.execute_pipeline()
     
-    intelligence = DurmotIntelligence(deep_scrape=pdf, profile_name=type)
-    results = intelligence.process_results(pipeline.rfp_master_list, days=days)
+    results = DurmotIntelligence(deep_scrape=pdf, profile_name=type).process_results(pipeline.rfp_master_list, days=days)
     
     clean_kw = keyword.strip().lower()
     if clean_kw and clean_kw not in ["all", "nationwide", "*"]:
@@ -468,22 +393,23 @@ def api_sweep(
             if b.get('friction_score', 0) > 0 and b.get('suspected_incumbent'):
                 logging.info(f"--> [AUTO-FORENSICS] Triggered for {b['suspected_incumbent']} at {b['agency']}...")
                 b['forensic_checkbook'] = query_municipal_checkbook(b['agency'], b['suspected_incumbent'])
-                b['forensic_opensecrets'] = query_opensecrets_api(b['suspected_incumbent'])
+                b['forensic_opensecrets'] = query_opensecrets_bypass(b['suspected_incumbent'])
+                b['forensic_revolving_door'] = query_revolving_door(b['agency'], b['suspected_incumbent'])
 
-    if not results:
-        return {"status": "No targets found for this configuration."}
-        
+    if not results: return {"status": "No targets found for this configuration."}
     return results
 
 @app.get("/api/checkbook")
 def api_checkbook(agency: str = "", vendor: str = ""):
-    if not agency or not vendor: return {"error": "Both agency and vendor required."}
     return query_municipal_checkbook(agency, vendor)
 
 @app.get("/api/opensecrets")
 def api_opensecrets(vendor: str = ""):
-    if not vendor: return {"error": "Vendor name required."}
-    return query_opensecrets_api(vendor)
+    return query_opensecrets_bypass(vendor)
+
+@app.get("/api/revolvingdoor")
+def api_revolvingdoor(agency: str = "", vendor: str = ""):
+    return query_revolving_door(agency, vendor)
 
 @app.get("/", response_class=HTMLResponse)
 def serve_dashboard():
@@ -525,36 +451,23 @@ def serve_dashboard():
                         <option value="0">Timeframe: All Historical (100+ Days)</option>
                         <option value="30">Timeframe: Last 30 Days</option>
                         <option value="60">Timeframe: Last 60 Days</option>
-                        <option value="90">Timeframe: Last 90 Days</option>
-                        <option value="120">Timeframe: Last 120 Days</option>
                     </select>
                 </div>
-
                 <div class="controls-group">
                     <select id="sweepType">
                         <option value="govtech">Target: GovTech & Software</option>
                         <option value="construction">Target: Construction & Roofing</option>
-                        <option value="all">Target: All Industries (Unfiltered)</option>
-                    </select>
-                </div>
-                <div class="controls-group">
-                    <select id="sweepState">
-                        <option value="All">Location: Nationwide</option>
-                        <option value="FL">Location: Florida</option>
-                        <option value="TX">Location: Texas</option>
-                        <option value="CA">Location: California</option>
-                        <option value="NY">Location: New York</option>
                     </select>
                 </div>
                 <input type="text" id="sweepKw" placeholder="Optional Keyword (e.g., Orlando)">
                 
                 <div style="margin-top: 15px; border-top: 1px solid #1e293b; padding-top: 10px;">
-                    <label><input type="checkbox" id="t_ds" checked> DemandStar (BYOT)</label><br>
-                    <label><input type="checkbox" id="t_cb" checked> Central Bidding (BYOT)</label><br>
-                    <label><input type="checkbox" id="t_vl" checked> VendorLink (BYOT)</label><br>
-                    <label><input type="checkbox" id="t_og" checked> OpenGov (Historical / Free)</label><br>
+                    <label><input type="checkbox" id="t_ds" checked> DemandStar</label><br>
+                    <label><input type="checkbox" id="t_cb" checked> Central Bidding</label><br>
+                    <label><input type="checkbox" id="t_vl" checked> VendorLink</label><br>
+                    <label><input type="checkbox" id="t_og" checked> OpenGov</label><br>
                     <label><input type="checkbox" id="t_pdf" checked> Deep PDF Inspection</label><br>
-                    <label><input type="checkbox" id="t_auto" checked> <strong>Auto-Trigger Forensics (API Heavy)</strong></label>
+                    <label><input type="checkbox" id="t_auto" checked> <strong>Auto-Trigger Forensics</strong></label>
                 </div>
 
                 <button onclick="runSweep()">Initialize Dragnet</button>
@@ -574,7 +487,15 @@ def serve_dashboard():
                     <h3>3. OPENSECRETS AUDIT</h3>
                     <input type="text" id="osVendor" placeholder="Vendor (e.g., Oracle)">
                     <button onclick="runOpenSecrets()">Trace Capital</button>
-                    <div id="osStatus" class="status">Tracing PAC Contributions...</div>
+                    <div id="osStatus" class="status">Bypassing API Gateway...</div>
+                </div>
+
+                <div class="panel">
+                    <h3>4. REVOLVING DOOR TRACKER</h3>
+                    <input type="text" id="rdAgency" placeholder="Agency (e.g., Orlando)">
+                    <input type="text" id="rdVendor" placeholder="Vendor (e.g., Acta Solutions)">
+                    <button onclick="runRevolvingDoor()">Scan Personnel</button>
+                    <div id="rdStatus" class="status">Cross-referencing LinkedIn records...</div>
                 </div>
             </div>
         </div>
@@ -587,21 +508,12 @@ def serve_dashboard():
             async function runSweep() {
                 document.getElementById('sweepStatus').style.display = 'block';
                 document.getElementById('output').innerText = 'Compiling intelligence. This may take 15-30 seconds depending on payload size...';
-                
                 const kw = encodeURIComponent(document.getElementById('sweepKw').value);
                 const type = encodeURIComponent(document.getElementById('sweepType').value);
-                const state = encodeURIComponent(document.getElementById('sweepState').value);
                 const days = encodeURIComponent(document.getElementById('sweepDays').value);
-                
-                const ds = document.getElementById('t_ds').checked;
-                const cb = document.getElementById('t_cb').checked;
-                const vl = document.getElementById('t_vl').checked;
-                const og = document.getElementById('t_og').checked;
-                const pdf = document.getElementById('t_pdf').checked;
-                const auto = document.getElementById('t_auto').checked;
-
+                const ds = document.getElementById('t_ds').checked, cb = document.getElementById('t_cb').checked, vl = document.getElementById('t_vl').checked, og = document.getElementById('t_og').checked, pdf = document.getElementById('t_pdf').checked, auto = document.getElementById('t_auto').checked;
                 try {
-                    const response = await fetch(`/api/sweep?keyword=${kw}&type=${type}&state=${state}&days=${days}&ds=${ds}&cb=${cb}&vl=${vl}&og=${og}&pdf=${pdf}&auto_forensics=${auto}`);
+                    const response = await fetch(`/api/sweep?keyword=${kw}&type=${type}&days=${days}&ds=${ds}&cb=${cb}&vl=${vl}&og=${og}&pdf=${pdf}&auto_forensics=${auto}`);
                     document.getElementById('output').innerText = JSON.stringify(await response.json(), null, 2);
                 } catch (err) { document.getElementById('output').innerText = 'Error: ' + err; }
                 document.getElementById('sweepStatus').style.display = 'none';
@@ -619,12 +531,22 @@ def serve_dashboard():
 
             async function runOpenSecrets() {
                 document.getElementById('osStatus').style.display = 'block';
-                document.getElementById('output').innerText = 'Tracing Historical PAC Contributions...';
+                document.getElementById('output').innerText = 'Executing Serper API Bypass...';
                 try {
                     const response = await fetch('/api/opensecrets?vendor=' + encodeURIComponent(document.getElementById('osVendor').value));
                     document.getElementById('output').innerText = JSON.stringify(await response.json(), null, 2);
                 } catch (err) { document.getElementById('output').innerText = 'Error: ' + err; }
                 document.getElementById('osStatus').style.display = 'none';
+            }
+
+            async function runRevolvingDoor() {
+                document.getElementById('rdStatus').style.display = 'block';
+                document.getElementById('output').innerText = 'Scanning LinkedIn databases...';
+                try {
+                    const response = await fetch('/api/revolvingdoor?agency=' + encodeURIComponent(document.getElementById('rdAgency').value) + '&vendor=' + encodeURIComponent(document.getElementById('rdVendor').value));
+                    document.getElementById('output').innerText = JSON.stringify(await response.json(), null, 2);
+                } catch (err) { document.getElementById('output').innerText = 'Error: ' + err; }
+                document.getElementById('rdStatus').style.display = 'none';
             }
         </script>
     </body>
