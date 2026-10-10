@@ -220,14 +220,31 @@ class RFPDataIngestion:
             except Exception as e:
                 logging.error(f"--> [Serper Dragnet Error] {str(e)}")
 
-    def bypass_opengov_api(self):
+    def bypass_opengov_api(self, state="All"):
         if not self.toggles.get("opengov"): return
-        portals = ["orlando", "orangecountyfl", "citrusfl", "cityofgainesville", "leoncounty", "austintexas", "seattle", "phoenix"]
+        
+        # Strictly map OpenGov portals by jurisdiction to prevent geo-bleed
+        state_portals = {
+            "TX": ["austintexas", "elpasotexas", "mcallen", "brazoscountytx", "parkercountytx"],
+            "FL": ["orlando", "orangecountyfl", "citrusfl", "cityofgainesville", "leoncounty"],
+            "WA": ["seattle"],
+            "AZ": ["phoenix"],
+            "CA": ["cityofsacramento", "sanjoseca"]
+        }
+        
+        if state != "All":
+            portals = state_portals.get(state, []) # Only use target state's portals
+        else:
+            portals = [p for sublist in state_portals.values() for p in sublist]
+
         headers = {
             "accept": "*/*", "content-type": "application/json", "origin": "https://procurement.opengov.com",
             "referer": "https://procurement.opengov.com/", "user-agent": "Mozilla/5.0"
         }
+        
         for portal in portals:
+            assigned_state = state if state != "All" else next((k for k, v in state_portals.items() if portal in v), "US")
+            
             for status in ["open", "evaluation", "closed"]:
                 try:
                     url = f"https://api.procurement.opengov.com/api/v1/government/{portal}/project/public"
@@ -239,7 +256,7 @@ class RFPDataIngestion:
                                 "source": "OpenGov",
                                 "title": item.get('title', item.get('name', 'Unknown Title')),
                                 "agency": portal.replace('cityof', 'City of ').title(),
-                                "state": "TX" if portal == "austintexas" else ("FL" if "fl" in portal or portal in ["orlando", "cityofgainesville", "leoncounty"] else "US"),
+                                "state": assigned_state,
                                 "published_date": item.get('publishedAt', item.get('releaseDate', item.get('created_at', ''))),
                                 "raw_metadata": item,
                                 "url": f"https://procurement.opengov.com/portal/{portal}/projects/{item.get('id')}" if item.get('id') else ""
@@ -248,7 +265,7 @@ class RFPDataIngestion:
 
     def execute_pipeline(self, state="All", keyword=""):
         self.intercept_serper_google_dragnet(state=state, keyword=keyword)
-        self.bypass_opengov_api()
+        self.bypass_opengov_api(state=state)
 
 class DurmotIntelligence:
     def __init__(self, deep_scrape=True, profile_name="govtech"):
@@ -605,8 +622,9 @@ def api_sweep(
         
     results = DurmotIntelligence(deep_scrape=pdf, profile_name=type).process_results(pipeline.rfp_master_list, days=days)
     
+    # STRICT GEO-FENCING: Kills out-of-state records (e.g., Seattle) bleeding into specific state traces
     if state != "All":
-        results = [b for b in results if b['state'].upper() == state.upper() or b['state'] == 'US']
+        results = [b for b in results if b['state'].upper() == state.upper()]
 
     # --------------------------------------------------------------------------
     # STAGES 5, 6 & 7: AUTONOMOUS GRAPH ESCALATION (OFFICER EXTRACTION)
