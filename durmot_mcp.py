@@ -49,10 +49,6 @@ class CorruptionGraph:
         self.edges[v][u] = {"weight": weight, "relation": relation}
 
     def compute_katz_centrality(self, alpha=0.1, beta=1.0, max_iter=20):
-        """
-        Calculates network influence via power iteration (matrix inversion approximation)
-        to discover central nodes across agencies, vendors, and corporate officers.
-        """
         nodes = list(self.nodes.keys())
         if not nodes:
             return {}
@@ -68,25 +64,22 @@ class CorruptionGraph:
                 new_centrality[n] = beta + (alpha * incoming_weight)
             centrality = new_centrality
             
-        # Normalize
         norm = math.sqrt(sum(v**2 for v in centrality.values())) or 1.0
         return {n: round(v / norm, 4) for n, v in centrality.items()}
 
-# Bayesian Prior Log-Odds Weights
 LOGIT_PRIORS = {
-    "SOLE_SOURCE": 1.40,            # High initial prior
-    "DIR_CONTRACT": 1.15,          # Texas DIR monopoly marker
-    "PIGGYBACK": 1.00,             # Cooperative avoidance
-    "SHORT_WINDOW": 1.30,          # Rigged RFP submission window
-    "METADATA_MATCH": 1.80,        # Ghostwriter detected in PDF
-    "CHECKBOOK_LOCK": 1.20,        # Historical genesis confirms lock-in
-    "CLEAN_RECORD": -1.60,         # Pruning signal (decay factor)
-    "SHARED_OFFICER": 2.10,        # High-threat entity linkage
-    "CAD_HOMESTEAD_ANOMALY": 1.70  # Undisclosed asset / real estate cluster
+    "SOLE_SOURCE": 1.40,            
+    "DIR_CONTRACT": 1.15,          
+    "PIGGYBACK": 1.00,             
+    "SHORT_WINDOW": 1.30,          
+    "METADATA_MATCH": 1.80,        
+    "CHECKBOOK_LOCK": 1.20,        
+    "CLEAN_RECORD": -1.60,         
+    "SHARED_OFFICER": 2.10,        
+    "CAD_HOMESTEAD_ANOMALY": 1.70  
 }
 
 def logit_to_prob(logit_val):
-    """Converts cumulative log-odds into probability [0.0, 1.0]"""
     try:
         return 1.0 / (1.0 + math.exp(-logit_val))
     except OverflowError:
@@ -96,6 +89,13 @@ def logit_to_prob(logit_val):
 # INDUSTRY & INTELLIGENCE PROFILES
 # ==============================================================================
 INDUSTRY_PROFILES = {
+    "florida_network": {
+        "name": "Florida Network (Top-Down)",
+        "search_terms": ["sole source", "piggyback", "Chapter 287 waiver", "exempt procurement"],
+        "tech_stack": [r"\bsoftware\b", r"\bconsulting\b", r"\bmanagement\b", r"\bengineering\b"],
+        "disqualify": [r"\blandscaping\b", r"\bjanitorial\b"],
+        "vendors": ["GEO Group", "HCA Healthcare", "Florida Power & Light", "Centene", "Motorola Solutions", "Tyler Technologies", "AshBritt"] 
+    },
     "govtech": {
         "name": "GovTech & Software",
         "search_terms": ["software", "erp", "system", "technology", "billing", "cloud"],
@@ -182,10 +182,10 @@ class RFPDataIngestion:
                 f'{kw_clean} ("public information report" OR "annual report" OR "managing member") site:opencorporates.com/companies/{jurisdiction}'.strip(),
                 f'{kw_clean} ("franchise tax" OR "officers" OR "directors") site:opencorporates.com'.strip()
             ]
-        elif self.profile_name == "texas_dirty":
+        elif self.profile_name == "texas_dirty" or self.profile_name == "florida_network":
             dork_queries = [
-                f'{kw_clean} ("DIR contract" OR "DIR-CPO" OR "sole source" OR "interlocal agreement") ("software" OR "services") site:*.tx.us'.strip(),
-                f'{kw_clean} ("Notice of Intent to Award" OR "sole source" OR "proprietary") site:*.tx.us'.strip()
+                f'{kw_clean} ("sole source" OR "interlocal agreement" OR "Chapter 287") site:*.{state.lower()}.us'.strip(),
+                f'{kw_clean} ("Notice of Intent to Award" OR "sole source" OR "proprietary") site:*.{state.lower()}.us'.strip()
             ]
         else:
             terms_joined = " OR ".join([f'"{t}"' for t in self.search_terms if t])
@@ -223,7 +223,6 @@ class RFPDataIngestion:
     def bypass_opengov_api(self, state="All"):
         if not self.toggles.get("opengov"): return
         
-        # Strictly map OpenGov portals by jurisdiction to prevent geo-bleed
         state_portals = {
             "TX": ["austintexas", "elpasotexas", "mcallen", "brazoscountytx", "parkercountytx"],
             "FL": ["orlando", "orangecountyfl", "citrusfl", "cityofgainesville", "leoncounty"],
@@ -233,7 +232,7 @@ class RFPDataIngestion:
         }
         
         if state != "All":
-            portals = state_portals.get(state, []) # Only use target state's portals
+            portals = state_portals.get(state, []) 
         else:
             portals = [p for sublist in state_portals.values() for p in sublist]
 
@@ -406,7 +405,8 @@ def query_revolving_door(agency_name, vendor_name):
 def query_corporate_registry(target_name, state_code="tx"):
     api_key = os.environ.get("SERPER_API_KEY")
     if not api_key: return {"error": "SERPER_API_KEY is missing."}
-    query = f'"{target_name}" ("managing member" OR "director" OR "agent" OR "public information report" OR "officer") site:opencorporates.com/companies/us_{state_code.lower()}'
+    # Notice: Search is set nationwide to catch shell companies registered out-of-state
+    query = f'"{target_name}" ("managing member" OR "director" OR "agent" OR "public information report" OR "officer") site:opencorporates.com/companies/us'
     headers = {"X-API-KEY": api_key, "Content-Type": "application/json"}
     try:
         res = tls_requests.post("https://google.serper.dev/search", headers=headers, json={"q": query}, timeout=15)
@@ -415,8 +415,8 @@ def query_corporate_registry(target_name, state_code="tx"):
             {"company_name": i.get("title", "").split("::")[0].strip(), "url": i.get("link", ""), "evidence": i.get("snippet", "")}
             for i in res.json().get("organic", []) if target_name.lower() in i.get("snippet", "").lower()
         ]
-        if not results: return {"status": f"No corporate filings or shell records found for '{target_name}' in {state_code.upper()}."}
-        return {"target_investigated": target_name, "jurisdiction": state_code.upper(), "shell_risk": "HIGH" if len(results) >= 2 else "MODERATE", "filings": results[:5]}
+        if not results: return {"status": f"No corporate filings or shell records found for '{target_name}'."}
+        return {"target_investigated": target_name, "shell_risk": "HIGH" if len(results) >= 2 else "MODERATE", "filings": results[:5]}
     except Exception as e: return {"error": str(e)}
 
 def query_real_estate_cad(target_name, state_code="tx"):
@@ -472,42 +472,12 @@ def run_friction_audit(keyword: str = "", days: int = 0, target_type: str = "gov
     return json.dumps(filtered if filtered else {"status": f"No bids matching '{keyword}'."}, indent=2)
 
 @mcp.tool
-def audit_vendor_lobbying(vendor_name: str) -> str:
-    return json.dumps([query_opensecrets_bypass(vendor_name)], indent=2)
-
-@mcp.tool
-def audit_vendor_checkbook(agency_name: str, vendor_name: str) -> str:
-    return json.dumps([query_municipal_checkbook(agency_name, vendor_name)], indent=2)
-
-@mcp.tool
-def audit_revolving_door(agency_name: str, vendor_name: str) -> str:
-    return json.dumps([query_revolving_door(agency_name, vendor_name)], indent=2)
-
-@mcp.tool
-def audit_corporate_registry(target_name: str, state_code: str = "tx") -> str:
-    return json.dumps([query_corporate_registry(target_name, state_code)], indent=2)
-
-@mcp.tool
-def audit_real_estate_holdings(target_name: str, state_code: str = "tx") -> str:
-    return json.dumps([query_real_estate_cad(target_name, state_code)], indent=2)
-
-@mcp.tool
-def audit_mineral_and_surplus(target_or_county: str, state_code: str = "tx") -> str:
-    return json.dumps([query_mineral_surplus(target_or_county, state_code)], indent=2)
-
-@mcp.tool
 def generate_commercial_dossier(agency_name: str, vendor_name: str, state_code: str = "tx") -> str:
-    """
-    Compiles a commercial-grade Opposition Research / Intelligence Dossier 
-    by automatically querying all forensic nodes for a specific target.
-    """
-    # 1. Gather all nodes autonomously
     genesis_data = query_municipal_checkbook(agency_name, vendor_name)
     corp_data = query_corporate_registry(vendor_name, state_code)
     finance_data = query_opensecrets_bypass(vendor_name)
     personnel_data = query_revolving_door(agency_name, vendor_name)
     
-    # 2. Extract key executives to run a secondary real estate/asset trace
     executives = []
     if corp_data.get("filings"):
         for filing in corp_data["filings"]:
@@ -516,10 +486,9 @@ def generate_commercial_dossier(agency_name: str, vendor_name: str, state_code: 
                 executives.append(match.group(1))
     
     asset_data = []
-    for exec_name in executives[:2]:  # Limit to top 2 execs to save API budget
+    for exec_name in executives[:2]:
         asset_data.append(query_real_estate_cad(exec_name, state_code))
 
-    # 3. Format the Core Book (Markdown)
     dossier = f"""
 # ⌖ INTELLIGENCE DOSSIER: {vendor_name.upper()} 
 **Target Agency:** {agency_name.title()} | **Jurisdiction:** {state_code.upper()}
@@ -554,6 +523,55 @@ def generate_commercial_dossier(agency_name: str, vendor_name: str, state_code: 
     dossier += "\n---\n*CONFIDENTIAL & PROPRIETARY. GENERATED BY AELFSTONE INTELLIGENCE ENGINE.*"
     return dossier
 
+# ==============================================================================
+# DIRTY BIRD NATIONWIDE RADAR
+# ==============================================================================
+
+STATE_HOTSPOT_SCORES = {
+    "TX": {"name": "Texas", "statutory_score": 96, "dork_scope": "site:*.tx.us OR site:texas.gov"},
+    "FL": {"name": "Florida", "statutory_score": 91, "dork_scope": "site:*.fl.us OR site:myflorida.com"},
+    "IL": {"name": "Illinois", "statutory_score": 88, "dork_scope": "site:*.il.us OR site:illinois.gov"},
+    "CA": {"name": "California", "statutory_score": 84, "dork_scope": "site:*.ca.gov"},
+    "NY": {"name": "New York", "statutory_score": 82, "dork_scope": "site:*.ny.gov OR site:*.ny.us"},
+    "GA": {"name": "Georgia", "statutory_score": 79, "dork_scope": "site:*.ga.gov"},
+    "OH": {"name": "Ohio", "statutory_score": 76, "dork_scope": "site:*.oh.gov OR site:*.ohio.gov"}
+}
+
+def get_scout_hotspots():
+    api_key = os.environ.get("SERPER_API_KEY")
+    if not api_key: return {"error": "SERPER_API_KEY missing."}
+        
+    radar_rankings = []
+    headers = {"X-API-KEY": api_key, "Content-Type": "application/json"}
+
+    for code, info in STATE_HOTSPOT_SCORES.items():
+        query = f'("Notice of Intent to Award" OR "Sole Source" OR "Proprietary Justification") ("software" OR "system") ({info["dork_scope"]})'
+        try:
+            res = tls_requests.post("https://google.serper.dev/search", headers=headers, json={"q": query, "tbs": "qdr:m"}, timeout=8)
+            raw_hits = len(res.json().get("organic", [])) if res.status_code == 200 else 0
+            
+            # Composite Dirty Bird Score: 60% Statutory vulnerability + 40% Live anomaly frequency
+            composite_score = round((info["statutory_score"] * 0.6) + (min(raw_hits * 4, 40)), 1)
+            radar_rankings.append({
+                "state_code": code,
+                "state_name": info["name"],
+                "composite_threat_score": composite_score,
+                "active_sole_source_density": raw_hits,
+                "recommended_action": "PRIORITY TARGET" if composite_score > 85 else "MODERATE TARGET"
+            })
+        except Exception: continue
+
+    radar_rankings.sort(key=lambda x: x["composite_threat_score"], reverse=True)
+    return {
+        "status": "Nationwide Radar Sweep Complete",
+        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "top_hunting_grounds": radar_rankings
+    }
+
+@mcp.tool
+def scout_nationwide_hotspots() -> str:
+    """Scans state procurement nodes nationwide and returns a ranked list of high-friction states."""
+    return json.dumps(get_scout_hotspots(), indent=2)
 
 # ==============================================================================
 # SECTION 4: WEB DASHBOARD, CAPITAL INGESTION & PROBABILISTIC EXECUTION
@@ -563,21 +581,19 @@ mcp_app = mcp.http_app(path="/")
 app = FastAPI(title="Aelfstone Intelligence Engine", lifespan=mcp_app.lifespan)
 app.mount("/mcp", mcp_app)
 
-def query_tec_capital(vendor_name):
-    """Scrapes Texas Ethics Commission (TEC) and OpenSecrets for capital friction."""
+def query_campaign_finance(vendor_name, target_politician="Ashley Moody"):
+    """Scrapes FEC and Florida Division of Elections for specific network capital friction."""
     api_key = os.environ.get("SERPER_API_KEY")
     if not api_key: return 0, []
     
-    # Dorking TEC Campaign Finance logs and OpenSecrets PAC summaries
-    query = f'"{vendor_name}" (site:ethics.state.tx.us/search/cf OR site:opensecrets.org)'
+    query = f'"{vendor_name}" "{target_politician}" (site:fec.gov/data OR site:dos.elections.myflorida.com OR site:opensecrets.org)'
     headers = {"X-API-KEY": api_key, "Content-Type": "application/json"}
     
     try:
         res = tls_requests.post("https://google.serper.dev/search", headers=headers, json={"q": query}, timeout=10)
         results = res.json().get("organic", [])
         
-        # Calculate capital friction (15 points per major campaign finance hit)
-        capital_friction = min(len(results) * 15, 100) 
+        capital_friction = min(len(results) * 20, 100) 
         return capital_friction, [{"title": r.get("title"), "snippet": r.get("snippet"), "url": r.get("link")} for r in results[:3]]
     except Exception:
         return 0, []
@@ -597,23 +613,18 @@ def api_sweep(
     capital_targets = []
     if auto_forensics and target_vendors:
         for vendor in target_vendors:
-            cap_score, cap_evidence = query_tec_capital(vendor)
-            if cap_score >= 45:  # Capital Friction Floor
+            cap_score, cap_evidence = query_campaign_finance(vendor)
+            if cap_score >= 40:  # Capital Friction Floor
                 capital_targets.append({
                     "vendor": vendor,
                     "capital_friction": cap_score,
                     "finance_records": cap_evidence
                 })
         
-        # Sort targets by political spending density
         capital_targets.sort(key=lambda x: x["capital_friction"], reverse=True)
     
-    # --------------------------------------------------------------------------
-    # STAGE 1 & 2: RFP DRAGNET (Targeted only at high-capital entities)
-    # --------------------------------------------------------------------------
     pipeline = RFPDataIngestion(toggles={"serper": serp, "demandstar": ds, "centralbidding": cb, "vendorlink": vl, "opengov": og}, profile_name=type)
     
-    # If we found high-dollar donors, we only sweep for their specific contracts
     if capital_targets:
         for target in capital_targets[:3]:
             pipeline.execute_pipeline(state=state, keyword=target["vendor"])
@@ -622,45 +633,41 @@ def api_sweep(
         
     results = DurmotIntelligence(deep_scrape=pdf, profile_name=type).process_results(pipeline.rfp_master_list, days=days)
     
-    # STRICT GEO-FENCING: Kills out-of-state records (e.g., Seattle) bleeding into specific state traces
     if state != "All":
         results = [b for b in results if b['state'].upper() == state.upper()]
 
-    # --------------------------------------------------------------------------
-    # STAGES 5, 6 & 7: AUTONOMOUS GRAPH ESCALATION (OFFICER EXTRACTION)
-    # --------------------------------------------------------------------------
     if auto_forensics:
         graph = CorruptionGraph()
         
         for b in results[:5]:  
-            # New Friction Floor to skip weak contracts
             if b.get('friction_score', 0) < 30:
                 b['probabilistic_engine'] = {"execution_status": "SKIPPED - Insufficient contract friction."}
                 continue
                 
             agency = b.get('agency', 'Unknown Agency')
-            vendor = b.get('suspected_incumbent') or b.get('title')
+            vendor = b.get('suspected_incumbent')
             
-            # Map the capital friction we found in Stage 3 to this contract hit
+            # Prevent querying corporate registries with massive RFP titles
+            if not vendor:
+                b['probabilistic_engine'] = {"execution_status": "HALTED - High friction found, but specific incumbent name could not be resolved."}
+                b['forensic_checkbook'] = query_municipal_checkbook(agency, b.get('title'))
+                continue
+            
             donor_profile = next((item for item in capital_targets if item["vendor"].lower() in vendor.lower()), None)
             if donor_profile:
                 b['forensic_capital_trace'] = donor_profile
                 
-            # Stage 2: Genesis Checkbook Search
             b['forensic_checkbook'] = query_municipal_checkbook(agency, vendor)
-            
-            # Stage 5: Extract the Corporate Officers via PIRs
-            corp_res = query_corporate_registry(vendor, state if state != "All" else "tx")
+            corp_res = query_corporate_registry(vendor, "us")
             b['forensic_corporate_registry'] = corp_res
             
-            # Stages 6 & 7: Pivot to Human Targets (CAD & Real Estate)
+            b['probabilistic_engine'] = {"execution_status": f"ESCALATED - Traced corporate entity '{vendor}', but no human officers extracted."}
+            
             if corp_res.get('filings'):
                 for filing in corp_res['filings'][:2]:
-                    # Regex extraction of human names from state franchise tax records
                     officer_match = re.search(r'([A-Z][a-z]+ [A-Z][a-z]+)', filing.get('evidence', ''))
                     if officer_match:
                         suspect_officer = officer_match.group(1)
-                        # Fire CAD property search on the extracted human
                         b['forensic_cad_property'] = query_real_estate_cad(suspect_officer, state if state != "All" else "tx")
                         
                         graph.add_node(agency, "AGENCY", agency)
@@ -668,14 +675,18 @@ def api_sweep(
                         graph.add_node(suspect_officer, "OFFICER", suspect_officer)
                         graph.add_edge(vendor, suspect_officer, weight=0.9, relation="officer_of")
                         graph.add_edge(agency, suspect_officer, weight=0.7, relation="awarded_by")
+                        
+                        b['probabilistic_engine'] = {
+                            "execution_status": f"CRITICAL - Mapped corporate officer '{suspect_officer}' to vendor '{vendor}' and cross-referenced personal assets."
+                        }
                         break
-            
-            b['probabilistic_engine'] = {
-                "execution_status": "ESCALATED - Capital donor verified. Corporate officers extracted and mapped."
-            }
 
     if not results: return {"status": "No high-friction targets found for this configuration."}
     return results
+
+@app.get("/api/scout_hotspots")
+def scout_hotspots_route():
+    return get_scout_hotspots()
 
 @app.get("/api/checkbook")
 def api_checkbook(agency: str = "", vendor: str = ""):
@@ -722,6 +733,8 @@ def serve_dashboard():
             label { font-size: 0.88em; display: inline-block; margin-bottom: 8px; cursor: pointer; color: #cbd5e1;}
             button { background: #2563eb; border: none; color: white; padding: 12px; cursor: pointer; border-radius: 2px; font-weight: bold; width: 100%; text-transform: uppercase; letter-spacing: 1px; transition: background 0.2s; margin-top: 10px;}
             button:hover { background: #1d4ed8; }
+            .radar-btn { background: #ef4444; margin-bottom: 15px; }
+            .radar-btn:hover { background: #dc2626; }
             .output-panel { background-color: #0f172a; padding: 20px; border-radius: 4px; border: 1px solid #334155; min-height: 500px; max-height: 800px; overflow-y: auto;}
             pre { color: #10b981; white-space: pre-wrap; word-wrap: break-word; margin: 0; font-size: 0.9em; line-height: 1.4;}
             .status { margin-top: 10px; font-size: 0.85em; color: #fbbf24; display: none; text-align: center; }
@@ -734,6 +747,7 @@ def serve_dashboard():
         <div class="grid">
             <div class="panel">
                 <h3>1. MARKET DRAGNET (AUTONOMOUS GRAPH)</h3>
+                <button class="radar-btn" onclick="runRadar()">Run Nationwide Dirty Bird Radar</button>
                 
                 <div class="controls-group">
                     <select id="sweepDays">
@@ -744,6 +758,7 @@ def serve_dashboard():
                 </div>
                 <div class="controls-group">
                     <select id="sweepType">
+                        <option value="florida_network" selected>Target: Florida Network (Top-Down)</option>
                         <option value="govtech">Target: GovTech & Software</option>
                         <option value="texas_dirty">Target: Dirty Texas (DIR & Sole Source)</option>
                         <option value="asset_recovery">Target: Asset Recovery & Mineral Rights</option>
@@ -754,11 +769,14 @@ def serve_dashboard():
                 </div>
                 <div class="controls-group">
                     <select id="sweepState">
-                        <option value="All">Location: Nationwide</option>
-                        <option value="TX" selected>Location: Texas</option>
-                        <option value="FL">Location: Florida</option>
-                        <option value="CA">Location: California</option>
-                        <option value="NY">Location: New York</option>
+                        <option value="FL">🔴 FL - Risk: 91 (Stat. 287 Waivers)</option>
+                        <option value="TX">🔴 TX - Risk: 96 (DIR Monopolies)</option>
+                        <option value="IL">🔴 IL - Risk: 88 (Interlocal Backdoors)</option>
+                        <option value="CA">🟡 CA - Risk: 84 (CMAS Rider Abuse)</option>
+                        <option value="NY">🟡 NY - Risk: 82 (OGS Exemptions)</option>
+                        <option value="GA">🟡 GA - Risk: 79 (Master Contract Monopolies)</option>
+                        <option value="OH">🟡 OH - Risk: 76 (IT Waivers)</option>
+                        <option value="All">⚪ Nationwide Dragnet (Unfiltered Wide-Net Sweep)</option>
                     </select>
                 </div>
                 <input type="text" id="sweepKw" placeholder="Keyword (e.g., Travis County, Harris, DIR)">
@@ -830,6 +848,16 @@ def serve_dashboard():
         </div>
 
         <script>
+            async function runRadar() {
+                document.getElementById('sweepStatus').style.display = 'block';
+                document.getElementById('output').innerText = 'Sweeping nationwide state procurement domains for sole-source anomalies...';
+                try {
+                    const response = await fetch('/api/scout_hotspots');
+                    document.getElementById('output').innerText = JSON.stringify(await response.json(), null, 2);
+                } catch (err) { document.getElementById('output').innerText = 'Error: ' + err; }
+                document.getElementById('sweepStatus').style.display = 'none';
+            }
+
             async function runSweep() {
                 document.getElementById('sweepStatus').style.display = 'block';
                 document.getElementById('output').innerText = 'Initializing probabilistic matrix and network dragnet...';
