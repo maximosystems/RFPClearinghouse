@@ -459,6 +459,15 @@ def serve_dashboard():
                         <option value="construction">Target: Construction & Roofing</option>
                     </select>
                 </div>
+                <div class="controls-group">
+                    <select id="sweepState">
+                        <option value="All">Location: Nationwide</option>
+                        <option value="FL">Location: Florida</option>
+                        <option value="TX">Location: Texas</option>
+                        <option value="CA">Location: California</option>
+                        <option value="NY">Location: New York</option>
+                    </select>
+                </div>
                 <input type="text" id="sweepKw" placeholder="Optional Keyword (e.g., Orlando)">
                 
                 <div style="margin-top: 15px; border-top: 1px solid #1e293b; padding-top: 10px;">
@@ -508,12 +517,15 @@ def serve_dashboard():
             async function runSweep() {
                 document.getElementById('sweepStatus').style.display = 'block';
                 document.getElementById('output').innerText = 'Compiling intelligence. This may take 15-30 seconds depending on payload size...';
+                
                 const kw = encodeURIComponent(document.getElementById('sweepKw').value);
                 const type = encodeURIComponent(document.getElementById('sweepType').value);
+                const state = encodeURIComponent(document.getElementById('sweepState').value);
                 const days = encodeURIComponent(document.getElementById('sweepDays').value);
+                
                 const ds = document.getElementById('t_ds').checked, cb = document.getElementById('t_cb').checked, vl = document.getElementById('t_vl').checked, og = document.getElementById('t_og').checked, pdf = document.getElementById('t_pdf').checked, auto = document.getElementById('t_auto').checked;
                 try {
-                    const response = await fetch(`/api/sweep?keyword=${kw}&type=${type}&days=${days}&ds=${ds}&cb=${cb}&vl=${vl}&og=${og}&pdf=${pdf}&auto_forensics=${auto}`);
+                    const response = await fetch(`/api/sweep?keyword=${kw}&state=${state}&type=${type}&days=${days}&ds=${ds}&cb=${cb}&vl=${vl}&og=${og}&pdf=${pdf}&auto_forensics=${auto}`);
                     document.getElementById('output').innerText = JSON.stringify(await response.json(), null, 2);
                 } catch (err) { document.getElementById('output').innerText = 'Error: ' + err; }
                 document.getElementById('sweepStatus').style.display = 'none';
