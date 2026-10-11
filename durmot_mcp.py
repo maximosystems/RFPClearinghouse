@@ -506,9 +506,29 @@ def serve_dashboard():
             label { font-size: 0.85em; display: block; margin-bottom: 8px; color: #cbd5e1; cursor: pointer; }
             button { background: #2563eb; border: none; color: #fff; padding: 12px; width: 100%; cursor: pointer; font-weight: bold; letter-spacing: 1px; text-transform: uppercase; border-radius: 2px; margin-top: 10px; transition: 0.2s; }
             button:hover { background: #1d4ed8; }
-            .output-panel { background: #0f172a; border: 1px solid #334155; border-radius: 4px; padding: 20px; min-height: 600px; max-height: 850px; overflow-y: auto; }
-            pre { color: #10b981; margin: 0; font-size: 0.88em; line-height: 1.4; white-space: pre-wrap; word-wrap: break-word; }
+            
+            /* Report Formatting Styles */
+            .output-panel { background: #0f172a; border: 1px solid #334155; border-radius: 4px; padding: 30px; min-height: 600px; max-height: 850px; overflow-y: auto; color: #e2e8f0; }
             .status { font-size: 0.85em; color: #fbbf24; text-align: center; margin-top: 12px; display: none; }
+            
+            /* Report Elements */
+            .report-header { border-bottom: 2px solid #38bdf8; padding-bottom: 10px; margin-bottom: 20px; }
+            .report-header h2 { margin: 0; color: #38bdf8; font-size: 1.5em; text-transform: uppercase; }
+            .report-section { margin-bottom: 25px; }
+            .report-section h3 { color: #818cf8; font-size: 1.1em; border-bottom: 1px solid #1e293b; padding-bottom: 5px; margin-bottom: 10px; }
+            
+            table { width: 100%; border-collapse: collapse; margin-top: 10px; font-size: 0.9em; }
+            th, td { border: 1px solid #334155; padding: 12px; text-align: left; vertical-align: top; }
+            th { background: #1e293b; color: #94a3b8; font-weight: bold; }
+            tr:nth-child(even) { background-color: #0b1120; }
+            .threat-score { font-size: 1.2em; font-weight: bold; color: #ef4444; }
+            
+            ul { margin: 0; padding-left: 20px; }
+            li { margin-bottom: 8px; }
+            a { color: #38bdf8; text-decoration: none; }
+            a:hover { text-decoration: underline; }
+            .evidence-snippet { color: #94a3b8; font-size: 0.9em; font-style: italic; display: block; margin-top: 4px; border-left: 2px solid #475569; padding-left: 10px; }
+            .error-box { background: #7f1d1d; color: #fecaca; padding: 15px; border-radius: 4px; border: 1px solid #ef4444; }
         </style>
     </head>
     <body>
@@ -541,8 +561,8 @@ def serve_dashboard():
                 <div id="statusText" class="status">Executing Forensic Trace...</div>
             </div>
 
-            <div class="output-panel">
-                <pre id="output">System Ready. Select an operational mode to begin.</pre>
+            <div class="output-panel" id="output">
+                <div style="color: #10b981;">System Ready. Select an operational mode to begin.</div>
             </div>
         </div>
 
@@ -567,6 +587,136 @@ def serve_dashboard():
                 }
             }
 
+            // HTML Formatter for Intelligence Output
+            function formatReport(data, mode) {
+                if (data.error) return `<div class="error-box"><strong>Execution Failed:</strong> ${data.error}</div>`;
+                if (data.status && !data.actionable_targets && !data.contracts_found && !data.suspected_corporate_donors) {
+                    return `<div style="color: #fbbf24;">${data.status}</div>`;
+                }
+
+                let html = '';
+
+                // MODE 1: DISCOVERY RADAR
+                if (mode === 'radar') {
+                    if (!data.actionable_targets || data.actionable_targets.length === 0) {
+                        return `<div style="color: #fbbf24;">No high-friction targets found in this sweep. Try expanding the timeframe.</div>`;
+                    }
+                    html += `
+                        <div class="report-header">
+                            <h2>⌖ DISCOVERY TARGET BOARD: ${data.jurisdiction}</h2>
+                        </div>
+                        <table>
+                            <tr>
+                                <th>Rank</th>
+                                <th>Target Entity</th>
+                                <th>Agency Nexus</th>
+                                <th>Threat Score</th>
+                                <th>Primary Vulnerability & Evidence</th>
+                            </tr>
+                    `;
+                    data.actionable_targets.forEach((t, index) => {
+                        html += `
+                            <tr>
+                                <td>#${index + 1}</td>
+                                <td><strong>${t.target_entity}</strong></td>
+                                <td>${t.agency}</td>
+                                <td><span class="threat-score">${t.composite_threat_score}/100</span></td>
+                                <td>
+                                    <strong>${t.solicitation_title}</strong><br>
+                                    <span style="color: #fbbf24; font-size: 0.85em;">Flags: ${t.friction_flags.join(', ')}</span><br>
+                                    <span style="color: #94a3b8; font-size: 0.85em;">Campaign Finance Hits: ${t.campaign_finance_hits}</span><br>
+                                    <a href="${t.contract_url}" target="_blank">[View Original Solicitation]</a>
+                                </td>
+                            </tr>
+                        `;
+                    });
+                    html += `</table>`;
+                }
+
+                // MODE 2: CORPORATE DOSSIER
+                else if (mode === 'company') {
+                    html += `
+                        <div class="report-header">
+                            <h2>⌖ CONFIDENTIAL INTELLIGENCE DOSSIER</h2>
+                            <div style="color: #94a3b8; margin-top: 5px;">
+                                <strong>Target Entity:</strong> ${data.target_entity} <br>
+                                <strong>Target Agency:</strong> ${data.target_agency} <br>
+                                <strong>Date Generated:</strong> ${data.timestamp}
+                            </div>
+                        </div>
+                    `;
+
+                    // Executive Summary
+                    html += `
+                        <div class="report-section">
+                            <h3>I. Threat Matrix Summary</h3>
+                            <ul>
+                                <li><strong>Genesis Contract Risk:</strong> ${data.stage_2_checkbook?.genesis_risk || 'UNKNOWN'}</li>
+                                <li><strong>Corporate Shell Risk:</strong> ${data.stage_5_corporate_web?.shell_risk || 'UNKNOWN'}</li>
+                                <li><strong>Revolving Door Risk:</strong> ${data.stage_4_revolving_door?.revolving_door_risk || 'UNKNOWN'}</li>
+                            </ul>
+                        </div>
+                    `;
+
+                    // Checkbook / Lock-in
+                    const evGenesis = data.stage_2_checkbook?.evidence || [];
+                    html += `<div class="report-section"><h3>II. Procurement Forensics (The Lock-in)</h3>`;
+                    if (evGenesis.length > 0) {
+                        html += `<ul>` + evGenesis.map(e => `<li><a href="${e.link}" target="_blank"><strong>${e.title}</strong></a><span class="evidence-snippet">${e.snippet}</span></li>`).join('') + `</ul>`;
+                    } else { html += `<em>No historical checkbook lock-ins identified.</em>`; }
+                    html += `</div>`;
+
+                    // Corporate Web
+                    const evCorp = data.stage_5_corporate_web?.filings || [];
+                    html += `<div class="report-section"><h3>III. Corporate Nexus & Filings</h3>`;
+                    if (evCorp.length > 0) {
+                        html += `<ul>` + evCorp.map(c => `<li><a href="${c.url}" target="_blank"><strong>${c.company}</strong></a><span class="evidence-snippet">${c.evidence}</span></li>`).join('') + `</ul>`;
+                    } else { html += `<em>No shell companies or PIR filings identified.</em>`; }
+                    html += `</div>`;
+
+                    // Real Estate & Assets
+                    html += `<div class="report-section"><h3>IV. Executive Asset Footprint (CAD)</h3>`;
+                    const assets = data.stage_6_officer_assets || [];
+                    if (assets.length > 0) {
+                        assets.forEach(asset => {
+                            const recs = asset.property_records || [];
+                            if(recs.length > 0) {
+                                html += `<ul>` + recs.map(r => `<li><a href="${r.url}" target="_blank"><strong>${r.record}</strong></a><span class="evidence-snippet">${r.evidence}</span></li>`).join('') + `</ul>`;
+                            }
+                        });
+                    } else { html += `<em>No significant geographic anomalies identified in real estate footprint.</em>`; }
+                    html += `</div>`;
+                }
+
+                // MODE 3: CAMPAIGN TRACE
+                else if (mode === 'campaign') {
+                    html += `
+                        <div class="report-header">
+                            <h2>⌖ CAMPAIGN FINANCE TRACE: ${data.target_politician}</h2>
+                        </div>
+                        <div class="report-section">
+                            <h3>Identified Corporate Donor Network</h3>
+                            <ul>
+                    `;
+                    if (data.suspected_corporate_donors && data.suspected_corporate_donors.length > 0) {
+                        data.suspected_corporate_donors.forEach(donor => {
+                            html += `<li><strong>${donor}</strong></li>`;
+                        });
+                    } else {
+                        html += `<li><em>No high-friction donors successfully extracted from snippets.</em></li>`;
+                    }
+                    html += `</ul></div>`;
+                    
+                    html += `<div class="report-section"><h3>Raw Extraction Evidence</h3><ul>`;
+                    data.raw_evidence.forEach(ev => {
+                        html += `<li><a href="${ev.link}" target="_blank"><strong>${ev.title}</strong></a><span class="evidence-snippet">${ev.snippet}</span></li>`;
+                    });
+                    html += `</ul></div>`;
+                }
+
+                return html;
+            }
+
             async function executeOperation() {
                 const status = document.getElementById('statusText');
                 const out = document.getElementById('output');
@@ -575,7 +725,7 @@ def serve_dashboard():
                 const target = encodeURIComponent(document.getElementById('targetInput').value);
                 
                 status.style.display = 'block';
-                out.innerText = 'Executing operation. Bypassing state portals and querying nodes...';
+                out.innerHTML = '<div style="color: #fbbf24;">Executing operation. Bypassing state portals and querying nodes...</div>';
 
                 try {
                     let url = '';
@@ -588,9 +738,13 @@ def serve_dashboard():
                     }
 
                     const res = await fetch(url);
-                    out.innerText = JSON.stringify(await res.json(), null, 2);
+                    const jsonData = await res.json();
+                    
+                    // Render the HTML report instead of raw JSON
+                    out.innerHTML = formatReport(jsonData, mode);
+                    
                 } catch (e) {
-                    out.innerText = 'Execution Error: ' + e;
+                    out.innerHTML = `<div class="error-box"><strong>Client Render Error:</strong> ${e}</div>`;
                 }
                 status.style.display = 'none';
             }
