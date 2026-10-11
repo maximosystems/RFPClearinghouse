@@ -317,14 +317,26 @@ def query_corporate_registry_nationwide(target_name):
     """Stage 5: Corporate Registry & Officer Extraction (Nationwide)"""
     api_key = os.environ.get("SERPER_API_KEY")
     if not api_key: return {"error": "SERPER_API_KEY missing."}
-    query = f'"{target_name}" ("managing member" OR "director" OR "officer" OR "president") site:opencorporates.com/companies/us'
+    
+    # Auto-sanitize: Grab only the first entity if comma-separated
+    primary_target = target_name.split(",")[0].strip()
+    
+    # Bypassing OpenCorporates block with indexable aggregators
+    query = f'"{primary_target}" ("managing member" OR "director" OR "officer" OR "president") (site:bizapedia.com OR site:corporationwiki.com)'
     headers = {"X-API-KEY": api_key, "Content-Type": "application/json"}
     try:
         res = tls_requests.post("https://google.serper.dev/search", headers=headers, json={"q": query}, timeout=10)
-        results = [
-            {"company": i.get("title", "").split("::")[0].strip(), "url": i.get("link"), "evidence": i.get("snippet")}
-            for i in res.json().get("organic", []) if target_name.lower() in i.get("snippet", "").lower()
-        ] if res.status_code == 200 else []
+        results = []
+        if res.status_code == 200:
+            for i in res.json().get("organic", []):
+                snippet = i.get("snippet", "")
+                # Relaxed exact-match constraint to check title or snippet
+                if primary_target.lower() in snippet.lower() or primary_target.lower() in i.get("title", "").lower():
+                    results.append({
+                        "company": i.get("title", "").split("-")[0].strip(),
+                        "url": i.get("link"),
+                        "evidence": snippet
+                    })
         return {"filings": results[:4]}
     except Exception as e: return {"error": str(e)}
 
@@ -373,9 +385,19 @@ def generate_commercial_dossier(agency_name: str, vendor_name: str, jurisdiction
     corp = query_corporate_registry_nationwide(vendor_name)
     
     officers = []
+    # Stop-words to prevent extracting capitalized legal jargon instead of human names
+    stop_words = ["Managing Member", "Limited Liability", "Public Information", "Annual Report", "United States", "The Company"]
+    
     for f in corp.get("filings", []):
-        m = re.search(r'([A-Z][a-z]+ [A-Z][a-z]+)', f.get("evidence", ""))
-        if m and m.group(1) not in officers: officers.append(m.group(1))
+        matches = re.findall(r'\b([A-Z][a-z]+ [A-Z][a-z]+)\b', f.get("evidence", ""))
+        for m in matches:
+            if m not in stop_words and m not in officers:
+                officers.append(m)
+                
+    # FALLBACK: If no human officers were cleanly extracted, run the CAD trace on the primary target entity
+    primary_entity = vendor_name.split(",")[0].strip()
+    if not officers:
+        officers = [primary_entity]
         
     assets = [query_cad_property_agnostic(off, jurisdiction) for off in officers[:2]]
     minerals = [query_asset_recovery_agnostic(off, jurisdiction) for off in officers[:2]]
