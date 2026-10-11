@@ -348,33 +348,34 @@ def query_corporate_registry_nationwide(target_name):
             if r["company"] not in seen and "Bizapedia" not in r["company"]:
                 seen.add(r["company"])
                 unique_results.append(r)
-                
-        return {"filings": unique_results[:4]}
-    except Exception as e: return {"error": str(e)}
+        
+        # FIX: Dynamically calculate shell risk score
+        shell_risk = "CRITICAL" if len(unique_results) >= 3 else ("HIGH" if len(unique_results) >= 1 else "LOW")
+        return {
+            "shell_risk": shell_risk,
+            "filings": unique_results[:4]
+        }
+    except Exception as e: return {"error": str(e), "shell_risk": "ERROR"}
 
 def query_cad_property_agnostic(target_name, state_code="US"):
-    """Stage 6: Real Estate Trace (Pivoted to OSINT Aggregators)"""
+    """Stage 6: Real Estate Trace (Commercial & County Appraisal Dorks)"""
     api_key = os.environ.get("SERPER_API_KEY")
     if not api_key: return {"error": "SERPER_API_KEY missing."}
     
-    # Government CADs block Google. We pivot to commercial property aggregators that index deeds.
-    query = f'"{target_name}" (site:blockshopper.com OR site:rehold.com OR site:homemetry.com)'
+    clean_target = target_name.replace("LLC", "").replace("Inc", "").strip()
+    query = f'"{clean_target}" ("property" OR "deed" OR "appraisal" OR "commercial") (site:propaccess.trueautomation.com OR site:traviscad.org OR site:commercialsearch.com OR site:loopnet.com)'
     headers = {"X-API-KEY": api_key, "Content-Type": "application/json"}
     try:
         res = tls_requests.post("https://google.serper.dev/search", headers=headers, json={"q": query}, timeout=10)
         results = []
         if res.status_code == 200:
             for i in res.json().get("organic", []):
-                # Clean up the output for the dossier
-                record_title = i.get("title", "").replace(" | BlockShopper", "").replace(" - Rehold", "")
-                
-                if target_name.lower() in i.get("snippet", "").lower() or target_name.lower() in record_title.lower():
-                    results.append({
-                        "record": record_title,
-                        "url": i.get("link"),
-                        "evidence": i.get("snippet")
-                    })
-        return {"property_records": results[:4]}
+                results.append({
+                    "record": i.get("title", ""),
+                    "url": i.get("link"),
+                    "evidence": i.get("snippet")
+                })
+        return {"property_records": results[:3]}
     except Exception as e: return {"error": str(e)}
 
 def query_asset_recovery_agnostic(target_name, state_code="US"):
@@ -406,8 +407,15 @@ def generate_commercial_dossier(agency_name: str, vendor_name: str, jurisdiction
     corp = query_corporate_registry_nationwide(vendor_name)
     
     officers = []
+    # Extract the discovered shell company names from Stage 5
+    shell_companies = [f.get("company") for f in corp.get("filings", []) if f.get("company")]
+    
     # Stop-words to prevent extracting capitalized legal jargon instead of human names
-    stop_words = ["Managing Member", "Limited Liability", "Public Information", "Annual Report", "United States", "The Company"]
+    stop_words = [
+        "Managing Member", "Limited Liability", "Public Information", "Annual Report", 
+        "United States", "The Company", "Governing Person", "Sole Principal", 
+        "Lavaca Street", "Austin Tx", "Core Information", "Company Info"
+    ]
     
     for f in corp.get("filings", []):
         matches = re.findall(r'\b([A-Z][a-z]+ [A-Z][a-z]+)\b', f.get("evidence", ""))
@@ -420,7 +428,13 @@ def generate_commercial_dossier(agency_name: str, vendor_name: str, jurisdiction
     if not officers:
         officers = [primary_entity]
         
+    # STAGE 6 DUAL-TRACE:
+    # 1. Personal name trace (Officers)
+    # 2. Direct property trace on the commercial LLC shells (e.g. 1800 Cesar Chavez)
     assets = [query_cad_property_agnostic(off, jurisdiction) for off in officers[:2]]
+    for shell in shell_companies[:2]:
+        assets.append(query_cad_property_agnostic(shell, jurisdiction))
+
     minerals = [query_asset_recovery_agnostic(off, jurisdiction) for off in officers[:2]]
 
     dossier = {
@@ -695,7 +709,7 @@ def serve_dashboard():
                             <h3>I. Threat Matrix Summary</h3>
                             <ul>
                                 <li><strong>Genesis Contract Risk:</strong> ${data.stage_2_checkbook?.genesis_risk || 'UNKNOWN'}</li>
-                                <li><strong>Corporate Shell Risk:</strong> ${data.stage_5_corporate_web?.shell_risk || 'UNKNOWN'}</li>
+                                <li><strong>Corporate Shell Risk:</strong> <span style="color: ${data.stage_5_corporate_web?.shell_risk === 'CRITICAL' ? '#ef4444' : '#fbbf24'};">${data.stage_5_corporate_web?.shell_risk || 'UNKNOWN'}</span></li>
                                 <li><strong>Revolving Door Risk:</strong> ${data.stage_4_revolving_door?.revolving_door_risk || 'UNKNOWN'}</li>
                             </ul>
                         </div>
@@ -721,12 +735,15 @@ def serve_dashboard():
                     html += `<div class="report-section"><h3>IV. Executive Asset Footprint (CAD)</h3>`;
                     const assets = data.stage_6_officer_assets || [];
                     if (assets.length > 0) {
+                        let hasAssets = false;
                         assets.forEach(asset => {
                             const recs = asset.property_records || [];
                             if(recs.length > 0) {
+                                hasAssets = true;
                                 html += `<ul>` + recs.map(r => `<li><a href="${r.url}" target="_blank"><strong>${r.record}</strong></a><span class="evidence-snippet">${r.evidence}</span></li>`).join('') + `</ul>`;
                             }
                         });
+                        if (!hasAssets) html += `<em>No significant geographic anomalies identified in real estate footprint.</em>`;
                     } else { html += `<em>No significant geographic anomalies identified in real estate footprint.</em>`; }
                     html += `</div>`;
                 }
