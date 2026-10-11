@@ -314,46 +314,67 @@ def query_revolving_door(agency_name, vendor_name):
     except Exception as e: return {"error": str(e)}
 
 def query_corporate_registry_nationwide(target_name):
-    """Stage 5: Corporate Registry & Officer Extraction (Nationwide)"""
+    """Stage 5: Corporate Registry (Relaxed Snippet Constraints)"""
     api_key = os.environ.get("SERPER_API_KEY")
     if not api_key: return {"error": "SERPER_API_KEY missing."}
     
-    # Auto-sanitize: Grab only the first entity if comma-separated
     primary_target = target_name.split(",")[0].strip()
     
-    # Bypassing OpenCorporates block with indexable aggregators
-    query = f'"{primary_target}" ("managing member" OR "director" OR "officer" OR "president") (site:bizapedia.com OR site:corporationwiki.com)'
+    # Dropped the strict "managing member" requirement to bypass snippet truncation
+    query = f'"{primary_target}" (site:bizapedia.com OR site:corporationwiki.com)'
     headers = {"X-API-KEY": api_key, "Content-Type": "application/json"}
     try:
         res = tls_requests.post("https://google.serper.dev/search", headers=headers, json={"q": query}, timeout=10)
         results = []
         if res.status_code == 200:
             for i in res.json().get("organic", []):
+                title = i.get("title", "")
                 snippet = i.get("snippet", "")
-                # Relaxed exact-match constraint to check title or snippet
-                if primary_target.lower() in snippet.lower() or primary_target.lower() in i.get("title", "").lower():
+                
+                # If it's a Bizapedia/CorpWiki link, the company name is usually before the dash in the title
+                company_name = title.split("-")[0].strip()
+                
+                if primary_target.lower() in snippet.lower() or primary_target.lower() in title.lower():
                     results.append({
-                        "company": i.get("title", "").split("-")[0].strip(),
+                        "company": company_name,
                         "url": i.get("link"),
                         "evidence": snippet
                     })
-        return {"filings": results[:4]}
+                    
+        # Filter duplicates
+        seen = set()
+        unique_results = []
+        for r in results:
+            if r["company"] not in seen and "Bizapedia" not in r["company"]:
+                seen.add(r["company"])
+                unique_results.append(r)
+                
+        return {"filings": unique_results[:4]}
     except Exception as e: return {"error": str(e)}
 
 def query_cad_property_agnostic(target_name, state_code="US"):
-    """Stage 6: County Appraisal District (CAD) Domicile Trace"""
+    """Stage 6: Real Estate Trace (Pivoted to OSINT Aggregators)"""
     api_key = os.environ.get("SERPER_API_KEY")
     if not api_key: return {"error": "SERPER_API_KEY missing."}
-    state_scope = f"site:*.{state_code.lower()}.us" if state_code != "US" else "site:*.us"
-    query = f'"{target_name}" ("Property Appraiser" OR "Appraisal District" OR "Homestead" OR "Warranty Deed") {state_scope}'
+    
+    # Government CADs block Google. We pivot to commercial property aggregators that index deeds.
+    query = f'"{target_name}" (site:blockshopper.com OR site:rehold.com OR site:homemetry.com)'
     headers = {"X-API-KEY": api_key, "Content-Type": "application/json"}
     try:
         res = tls_requests.post("https://google.serper.dev/search", headers=headers, json={"q": query}, timeout=10)
-        results = [
-            {"record": i.get("title"), "url": i.get("link"), "evidence": i.get("snippet")}
-            for i in res.json().get("organic", []) if target_name.lower() in i.get("snippet", "").lower()
-        ] if res.status_code == 200 else []
-        return {"property_records": results[:3]}
+        results = []
+        if res.status_code == 200:
+            for i in res.json().get("organic", []):
+                # Clean up the output for the dossier
+                record_title = i.get("title", "").replace(" | BlockShopper", "").replace(" - Rehold", "")
+                
+                if target_name.lower() in i.get("snippet", "").lower() or target_name.lower() in record_title.lower():
+                    results.append({
+                        "record": record_title,
+                        "url": i.get("link"),
+                        "evidence": i.get("snippet")
+                    })
+        return {"property_records": results[:4]}
     except Exception as e: return {"error": str(e)}
 
 def query_asset_recovery_agnostic(target_name, state_code="US"):
